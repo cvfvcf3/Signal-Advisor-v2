@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signal Advisor v2</title>
+<style>
+  :root {
+    --bg: #0b0e11; --panel: #12161b; --border: #23282f;
+    --text: #e8ecef; --muted: #8b95a1;
+    --bull: #16c784; --bear: #ea3943; --accent: #f0b90b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 0; padding: 16px;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+  .selectors { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 12px; border-radius: 6px; font-size: 14px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 12px;
+  }
+  .signal-row { display: flex; justify-content: space-between; align-items: center; }
+  .action { font-size: 22px; font-weight: 700; }
+  .action.BUY { color: var(--bull); }
+  .action.SELL { color: var(--bear); }
+  .action.WAIT { color: var(--muted); }
+  .confidence { font-size: 28px; font-weight: 700; }
+  .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+  .stat { background: #0f1318; border-radius: 8px; padding: 8px; text-align: center; }
+  .stat .label { color: var(--muted); font-size: 11px; }
+  .stat .value { font-size: 16px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+  .badge.CORRECT { background: rgba(22,199,132,0.15); color: var(--bull); }
+  .badge.INCORRECT { background: rgba(234,57,67,0.15); color: var(--bear); }
+  .badge.PENDING { background: rgba(240,185,11,0.15); color: var(--accent); }
+  .layer-bar { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .log-line { font-size: 11px; color: var(--muted); padding: 3px 0; }
+</style>
+</head>
+<body>
+
+<h1>Signal Advisor v2</h1>
+<div class="subtitle">READ-ONLY · NO TRADING · Multi-coin, multi-mode</div>
+
+<div class="selectors">
+  <select id="symbolSelect"></select>
+  <select id="modeSelect"></select>
+</div>
+
+<div class="card">
+  <div class="signal-row">
+    <div>
+      <div class="action" id="actionLabel">--</div>
+      <div class="subtitle" id="entryLabel">entry: --</div>
+    </div>
+    <div class="confidence" id="confidenceLabel">--</div>
+  </div>
+  <div class="stat-grid">
+    <div class="stat"><div class="label">Correct</div><div class="value" id="statCorrect">--</div></div>
+    <div class="stat"><div class="label">Incorrect</div><div class="value" id="statIncorrect">--</div></div>
+    <div class="stat"><div class="label">Accuracy</div><div class="value" id="statAccuracy">--</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <strong>Layer Breakdown</strong>
+  <div id="layerBreakdown"></div>
+</div>
+
+<div class="card">
+  <strong>Signal Journal</strong>
+  <table>
+    <thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Entry</th><th>Status</th></tr></thead>
+    <tbody id="journalBody"></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <strong>Activity Log</strong>
+  <div id="activityLog"></div>
+</div>
+
+<script>
+const symbolSelect = document.getElementById('symbolSelect');
+const modeSelect = document.getElementById('modeSelect');
+
+async function loadSymbols() {
+  const res = await fetch('/api/symbols');
+  const data = await res.json();
+  symbolSelect.innerHTML = data.symbols.map(s => `<option value="${s}">${s}</option>`).join('');
+  modeSelect.innerHTML = data.modes.map(m => `<option value="${m}">${m}</option>`).join('');
+  refresh();
+}
+
+function fmtTime(iso) {
+  if (!iso) return '--';
+  const d = new Date(iso);
+  return d.toLocaleTimeString();
+}
+
+async function refresh() {
+  const symbol = symbolSelect.value;
+  const mode = modeSelect.value;
+  if (!symbol || !mode) return;
+
+  try {
+    const sigRes = await fetch(`/api/current_signal?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
+    const sig = await sigRes.json();
+
+    const actionEl = document.getElementById('actionLabel');
+    actionEl.textContent = sig.action || '--';
+    actionEl.className = 'action ' + (sig.action || '');
+    document.getElementById('confidenceLabel').textContent = sig.confidence != null ? sig.confidence : '--';
+    document.getElementById('entryLabel').textContent = 'entry: ' + (sig.entry_price != null ? sig.entry_price : '--');
+
+    const layersDiv = document.getElementById('layerBreakdown');
+    if (sig.layers) {
+      layersDiv.innerHTML = Object.entries(sig.layers).map(([name, r]) =>
+        `<div class="layer-bar"><span>${name}</span><span>bull ${r.bullish_score} / bear ${r.bearish_score}</span></div>`
+      ).join('');
+    } else {
+      layersDiv.innerHTML = '<div class="subtitle">No reading yet</div>';
+    }
+  } catch (e) { console.error(e); }
+
+  try {
+    const accRes = await fetch(`/api/accuracy?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
+    const acc = await accRes.json();
+    document.getElementById('statCorrect').textContent = acc.correct ?? '--';
+    document.getElementById('statIncorrect').textContent = acc.incorrect ?? '--';
+    document.getElementById('statAccuracy').textContent = acc.accuracy_pct != null ? acc.accuracy_pct + '%' : '--';
+  } catch (e) { console.error(e); }
+
+  try {
+    const histRes = await fetch(`/api/signals?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}&limit=20`);
+    const hist = await histRes.json();
+    document.getElementById('journalBody').innerHTML = hist.map(row => `
+      <tr>
+        <td>${fmtTime(row.created_at)}</td>
+        <td>${row.action}</td>
+        <td>${row.confidence}</td>
+        <td>${row.entry_price}</td>
+        <td><span class="badge ${row.status}">${row.status}</span></td>
+      </tr>
+    `).join('');
+  } catch (e) { console.error(e); }
+
+  try {
+    const logRes = await fetch('/api/logs');
+    const logs = await logRes.json();
+    document.getElementById('activityLog').innerHTML = logs.slice(0, 20).map(l =>
+      `<div class="log-line">${fmtTime(l.time)} — ${l.message}</div>`
+    ).join('') || '<div class="subtitle">No activity yet</div>';
+  } catch (e) { console.error(e); }
+}
+
+symbolSelect.addEventListener('change', refresh);
+modeSelect.addEventListener('change', refresh);
+loadSymbols();
+setInterval(refresh, 15000);
+</script>
+
+</body>
+</html>
