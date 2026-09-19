@@ -29,6 +29,13 @@ class ExchangeClient:
             "rateLimit": ex_cfg.get("rate_limit_ms", 250),
             "options": {
                 "defaultType": "future" if ex_cfg.get("market_type") == "future" else "spot",
+                # Skip ccxt's automatic fetchCurrencies() call during
+                # loadMarkets(). That call hits a wallet/SAPI endpoint we
+                # don't need (we only read public market data), and it can
+                # be geo-restricted (HTTP 451) even when the market-data
+                # endpoints we actually use are not.
+                "fetchCurrencies": False,
+                "warnOnFetchOpenOrdersWithoutSymbol": False,
             },
         })
 
