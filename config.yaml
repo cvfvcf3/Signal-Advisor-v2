@@ -1,0 +1,94 @@
+exchange:
+  id: binance
+  market_type: future
+  rate_limit_ms: 250
+
+symbols:
+  - BTC/USDT
+  - ETH/USDT
+  - SOL/USDT
+  - BNB/USDT
+  - XRP/USDT
+  - ADA/USDT
+  - DOGE/USDT
+
+btc_symbol: BTC/USDT
+
+btc_macro_filter:
+  enabled: true
+  htf_timeframe: "4h"
+  strong_threshold: 70
+  bullish:
+    buy_multiplier: 1.15
+    sell_multiplier: 0.70
+  bearish:
+    buy_multiplier: 0.50
+    sell_multiplier: 1.15
+
+modes:
+  scalp:
+    primary_timeframe: "1m"
+    confirm_timeframes: ["5m", "15m"]
+    min_score_to_signal: 65
+    min_score_gap: 10
+    evaluation_candles: 15
+    success_move_pct: 0.003
+    weights:
+      technical: 20
+      multi_timeframe: 15
+      orderbook: 35
+      market_structure: 5
+      smc: 25
+    smc_weight_cap_if_htf_disagrees: 15
+
+  day:
+    primary_timeframe: "15m"
+    confirm_timeframes: ["1h", "4h"]
+    min_score_to_signal: 68
+    min_score_gap: 12
+    evaluation_candles: 20
+    success_move_pct: 0.01
+    weights:
+      technical: 35
+      multi_timeframe: 25
+      orderbook: 15
+      market_structure: 15
+      smc: 10
+
+  swing:
+    primary_timeframe: "4h"
+    confirm_timeframes: ["1d"]
+    min_score_to_signal: 70
+    min_score_gap: 15
+    evaluation_candles: 30
+    success_move_pct: 0.03
+    weights:
+      technical: 25
+      multi_timeframe: 35
+      orderbook: 5
+      market_structure: 25
+      smc: 10
+
+active_modes:
+  - scalp
+  - day
+  - swing
+
+market_structure:
+  rolling_window_candles: 150
+
+smc:
+  fractal_left: 5
+  fractal_right: 5
+
+cache:
+  ttl_seconds: 30
+
+poll_interval_seconds: 90
+
+telegram:
+  enabled: true
+  min_confidence_to_notify: 70
+
+dashboard:
+  admin_token_env: DASHBOARD_ADMIN_TOKEN
