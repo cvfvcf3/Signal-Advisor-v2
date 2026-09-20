@@ -8,11 +8,14 @@ at startup (by main.py) and its run_tick() is called on a timer
   2. Loops over every (symbol, mode) combination, running all 5 layers,
      combining them into a composite score, applying the BTC macro-filter
      to altcoins, and deciding BUY/SELL/WAIT.
-  3. Records new BUY/SELL signals to the journal (with duplicate
-     protection — a repeat of the same still-pending action on the same
-     symbol+mode is not re-recorded/re-notified).
+  3. On a new BUY/SELL, computes take_profit and stop_loss price levels
+     from the mode's success_move_pct / stop_loss_pct, and records the
+     signal to the journal (with duplicate protection — a repeat of the
+     same still-pending action on the same symbol+mode is not
+     re-recorded/re-notified).
   4. Evaluates any previously-PENDING signals against newly-closed
-     candles and resolves them.
+     candles (path-aware TP/SL check — see evaluator.py) and resolves
+     them.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
@@ -165,12 +168,27 @@ class Advisor:
         if decision["action"] in ("BUY", "SELL"):
             self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores)
 
+    def _compute_tp_sl(self, action, entry_price, mode_cfg):
+        success_pct = mode_cfg["success_move_pct"]
+        stop_pct = mode_cfg["stop_loss_pct"]
+
+        if action == "BUY":
+            take_profit = entry_price * (1 + success_pct)
+            stop_loss = entry_price * (1 - stop_pct)
+        else:  # SELL
+            take_profit = entry_price * (1 - success_pct)
+            stop_loss = entry_price * (1 + stop_pct)
+
+        return round(take_profit, 8), round(stop_loss, 8)
+
     def _maybe_record_signal(self, symbol, mode_name, decision, entry_price, mode_cfg, layer_scores):
         """Duplicate protection: don't re-record/re-notify the same action
         while the previous signal for this symbol+mode is still PENDING."""
         last = journal.get_last_signal(symbol, mode_name)
         if last and last["action"] == decision["action"] and last["status"] == "PENDING":
             return
+
+        take_profit, stop_loss = self._compute_tp_sl(decision["action"], entry_price, mode_cfg)
 
         signal_id = journal.record_signal(
             symbol=symbol,
@@ -180,6 +198,8 @@ class Advisor:
             entry_price=entry_price,
             evaluate_after_candles=mode_cfg["evaluation_candles"],
             success_move_pct=mode_cfg["success_move_pct"],
+            take_profit=take_profit,
+            stop_loss=stop_loss,
             layers_snapshot=layer_scores,
         )
 
@@ -191,6 +211,8 @@ class Advisor:
                 "action": decision["action"],
                 "confidence": decision["confidence"],
                 "entry_price": entry_price,
+                "take_profit": take_profit,
+                "stop_loss": stop_loss,
                 "layers": layer_scores,
             })
 

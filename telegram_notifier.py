@@ -31,7 +31,9 @@ def _format_message(signal):
     return (
         f"{signal['action']} signal — {signal['symbol']} ({signal['mode']})\n"
         f"Confidence: {signal['confidence']}\n"
-        f"Entry: {signal['entry_price']}\n\n"
+        f"Entry: {signal['entry_price']}\n"
+        f"Take-Profit: {signal.get('take_profit', '--')}\n"
+        f"Stop-Loss: {signal.get('stop_loss', '--')}\n\n"
         f"Layers:\n{layers_text}\n\n"
         f"Read-only advisor — no trade was placed."
     )

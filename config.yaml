@@ -33,6 +33,7 @@ modes:
     min_score_gap: 10
     evaluation_candles: 15
     success_move_pct: 0.003
+    stop_loss_pct: 0.002
     weights:
       technical: 20
       multi_timeframe: 15
@@ -48,6 +49,7 @@ modes:
     min_score_gap: 12
     evaluation_candles: 20
     success_move_pct: 0.01
+    stop_loss_pct: 0.006
     weights:
       technical: 35
       multi_timeframe: 25
@@ -62,6 +64,7 @@ modes:
     min_score_gap: 15
     evaluation_candles: 30
     success_move_pct: 0.03
+    stop_loss_pct: 0.018
     weights:
       technical: 25
       multi_timeframe: 35

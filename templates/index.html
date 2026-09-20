@@ -25,7 +25,7 @@
   }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 16px; margin-bottom: 12px;
+    padding: 16px; margin-bottom: 12px; overflow-x: auto;
   }
   .signal-row { display: flex; justify-content: space-between; align-items: center; }
   .action { font-size: 22px; font-weight: 700; }
@@ -33,17 +33,29 @@
   .action.SELL { color: var(--bear); }
   .action.WAIT { color: var(--muted); }
   .confidence { font-size: 28px; font-weight: 700; }
+  .tp-sl-row { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .tp-sl-row .tp { color: var(--bull); }
+  .tp-sl-row .sl { color: var(--bear); }
   .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
   .stat { background: #0f1318; border-radius: 8px; padding: 8px; text-align: center; }
   .stat .label { color: var(--muted); font-size: 11px; }
   .stat .value { font-size: 16px; font-weight: 600; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; white-space: nowrap; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
   .badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
   .badge.CORRECT { background: rgba(22,199,132,0.15); color: var(--bull); }
   .badge.INCORRECT { background: rgba(234,57,67,0.15); color: var(--bear); }
   .badge.PENDING { background: rgba(240,185,11,0.15); color: var(--accent); }
+  .mode-badge {
+    background: #1c2128; border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; font-size: 10px; color: var(--muted); text-transform: uppercase;
+  }
+  .action-text { font-weight: 600; }
+  .action-text.BUY { color: var(--bull); }
+  .action-text.SELL { color: var(--bear); }
+  .tp-text { color: var(--bull); }
+  .sl-text { color: var(--bear); }
   .layer-bar { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
   .log-line { font-size: 11px; color: var(--muted); padding: 3px 0; }
 </style>
@@ -53,6 +65,15 @@
 <h1>Signal Advisor v2</h1>
 <div class="subtitle">READ-ONLY · NO TRADING · Multi-coin, multi-mode</div>
 
+<div class="card">
+  <strong>All Signals (every coin, every mode)</strong>
+  <table>
+    <thead><tr><th>Time</th><th>Symbol</th><th>Mode</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
+    <tbody id="allSignalsBody"></tbody>
+  </table>
+</div>
+
+<div class="subtitle" style="margin-top: 4px;">Detail view for one coin/mode:</div>
 <div class="selectors">
   <select id="symbolSelect"></select>
   <select id="modeSelect"></select>
@@ -63,6 +84,10 @@
     <div>
       <div class="action" id="actionLabel">--</div>
       <div class="subtitle" id="entryLabel">entry: --</div>
+      <div class="tp-sl-row">
+        <span class="tp">TP: <span id="tpLabel">--</span></span>
+        <span class="sl">SL: <span id="slLabel">--</span></span>
+      </div>
     </div>
     <div class="confidence" id="confidenceLabel">--</div>
   </div>
@@ -79,9 +104,9 @@
 </div>
 
 <div class="card">
-  <strong>Signal Journal</strong>
+  <strong>Signal Journal (selected coin/mode)</strong>
   <table>
-    <thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Entry</th><th>Status</th></tr></thead>
+    <thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
     <tbody id="journalBody"></tbody>
   </table>
 </div>
@@ -109,9 +134,36 @@ function fmtTime(iso) {
   return d.toLocaleTimeString();
 }
 
+function fmtNum(n) {
+  return n != null ? n : '--';
+}
+
+async function refreshAllSignals() {
+  try {
+    const res = await fetch('/api/signals?limit=50');
+    const rows = await res.json();
+    document.getElementById('allSignalsBody').innerHTML = rows.map(row => `
+      <tr>
+        <td>${fmtTime(row.created_at)}</td>
+        <td>${row.symbol}</td>
+        <td><span class="mode-badge">${row.mode}</span></td>
+        <td><span class="action-text ${row.action}">${row.action}</span></td>
+        <td>${row.confidence}</td>
+        <td>${row.entry_price}</td>
+        <td class="tp-text">${fmtNum(row.take_profit)}</td>
+        <td class="sl-text">${fmtNum(row.stop_loss)}</td>
+        <td><span class="badge ${row.status}">${row.status}</span></td>
+      </tr>
+    `).join('') || '<tr><td colspan="9" class="subtitle">No signals yet</td></tr>';
+  } catch (e) { console.error(e); }
+}
+
 async function refresh() {
   const symbol = symbolSelect.value;
   const mode = modeSelect.value;
+
+  await refreshAllSignals();
+
   if (!symbol || !mode) return;
 
   try {
@@ -145,12 +197,23 @@ async function refresh() {
   try {
     const histRes = await fetch(`/api/signals?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}&limit=20`);
     const hist = await histRes.json();
+
+    if (hist.length > 0) {
+      document.getElementById('tpLabel').textContent = fmtNum(hist[0].take_profit);
+      document.getElementById('slLabel').textContent = fmtNum(hist[0].stop_loss);
+    } else {
+      document.getElementById('tpLabel').textContent = '--';
+      document.getElementById('slLabel').textContent = '--';
+    }
+
     document.getElementById('journalBody').innerHTML = hist.map(row => `
       <tr>
         <td>${fmtTime(row.created_at)}</td>
         <td>${row.action}</td>
         <td>${row.confidence}</td>
         <td>${row.entry_price}</td>
+        <td class="tp-text">${fmtNum(row.take_profit)}</td>
+        <td class="sl-text">${fmtNum(row.stop_loss)}</td>
         <td><span class="badge ${row.status}">${row.status}</span></td>
       </tr>
     `).join('');

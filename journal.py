@@ -16,6 +16,10 @@ tick loop (background thread) both touch this database. To avoid
 
 Every signal record carries both symbol and mode, since accuracy and
 history must be tracked per (symbol, mode) combination — never mixed.
+
+Each signal also stores take_profit and stop_loss price levels (computed
+by advisor_engine.py from the mode's success_move_pct / stop_loss_pct),
+so the journal — and the dashboard — show more than just an entry price.
 """
 
 import os
@@ -36,6 +40,12 @@ def _connect():
     conn.execute("PRAGMA busy_timeout=5000;")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _add_column_if_missing(conn, table, column, coltype):
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
 def init_db():
@@ -64,6 +74,10 @@ def init_db():
                     notified INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            # Migration for DBs created before take_profit/stop_loss existed.
+            _add_column_if_missing(conn, "signals", "take_profit", "REAL")
+            _add_column_if_missing(conn, "signals", "stop_loss", "REAL")
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_mode ON signals(symbol, mode)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON signals(status)")
             conn.commit()
@@ -72,9 +86,13 @@ def init_db():
 
 
 def record_signal(symbol, mode, action, confidence, entry_price,
-                   evaluate_after_candles, success_move_pct, layers_snapshot=None):
+                   evaluate_after_candles, success_move_pct,
+                   take_profit, stop_loss, layers_snapshot=None):
     """
     Inserts a new PENDING signal. Returns the generated signal_id.
+    take_profit / stop_loss: absolute price levels (not percentages),
+                              computed by the caller from the mode's
+                              success_move_pct / stop_loss_pct.
     layers_snapshot: dict of which layers/values supported this signal
                       (stored as JSON, used for dashboard + Telegram detail).
     """
@@ -88,12 +106,12 @@ def record_signal(symbol, mode, action, confidence, entry_price,
                 INSERT INTO signals (
                     signal_id, symbol, mode, action, confidence, entry_price,
                     created_at, evaluate_after_candles, success_move_pct,
-                    status, layers_snapshot
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
+                    take_profit, stop_loss, status, layers_snapshot
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)
             """, (
                 signal_id, symbol, mode, action, confidence, entry_price,
                 created_at, evaluate_after_candles, success_move_pct,
-                json.dumps(layers_snapshot or {}),
+                take_profit, stop_loss, json.dumps(layers_snapshot or {}),
             ))
             conn.commit()
         finally:

@@ -2,96 +2,95 @@
 Evaluator: checks PENDING journal signals against subsequent CLOSED
 candles and resolves them to CORRECT / INCORRECT.
 
-RESOLUTION RULE (fixed, not ambiguous):
-    BUY  is CORRECT if, within `evaluate_after_candles` candles after
-         entry, future_high >= entry * (1 + success_move_pct).
-    SELL is CORRECT if, within the same window,
-         future_low <= entry * (1 - success_move_pct).
-    If the window elapses without the target being hit, the signal is
-    INCORRECT — not left ambiguous, and not silently dropped.
+PATH-AWARE RESOLUTION: each candle since entry is walked in chronological
+order. Whichever level — take_profit or stop_loss — is touched FIRST
+determines the outcome:
+    BUY:  TP touched when candle high >= take_profit
+          SL touched when candle low  <= stop_loss
+    SELL: TP touched when candle low  <= take_profit
+          SL touched when candle high >= stop_loss
+If a single candle's range touches BOTH levels (a large/volatile candle),
+the conservative assumption is that STOP-LOSS was hit first — this avoids
+overstating accuracy on wide-range candles where the true intra-candle
+order is unknown from OHLC data alone.
 
-MAE / MFE are recorded for every resolved signal (Maximum Adverse/
-Favorable Excursion, as a % of entry price) so weights/thresholds can
-later be tuned from more than just win/loss — e.g. a BUY that was
-correct but had deep MAE first is a noisier win than a clean one.
+If neither level is touched within `evaluate_after_candles` candles, the
+signal resolves INCORRECT at the last available close (the move never
+materialized within the intended window) — not left ambiguous.
+
+MAE / MFE are accumulated across all candles actually walked (up to the
+resolution point or the end of the window), as a % of entry price.
 
 This only ever evaluates against CLOSED candles the caller supplies —
 it never estimates or assumes future price action.
 """
 
 
-def _window_high_low(candles):
-    highs = [c[2] for c in candles]
-    lows = [c[3] for c in candles]
-    return max(highs), min(lows)
-
-
 def is_ready_to_evaluate(signal, candles_since_entry):
-    """
-    signal: a journal row (dict) with 'evaluate_after_candles'.
-    candles_since_entry: list of CLOSED candles that occurred after the
-                          signal's entry candle, in chronological order.
-
-    Returns True once enough candles have closed to apply the resolution
-    rule; False if we should keep waiting.
-    """
+    """True once either enough candles have closed to apply the timeout
+    rule, or (checked by evaluate_signal itself) TP/SL was already hit."""
     return len(candles_since_entry) >= signal["evaluate_after_candles"]
 
 
 def evaluate_signal(signal, candles_since_entry):
     """
-    signal: journal row (dict) — needs action, entry_price,
-            success_move_pct, evaluate_after_candles.
+    signal: journal row (dict) — needs action, entry_price, take_profit,
+            stop_loss, evaluate_after_candles.
     candles_since_entry: CLOSED candles after entry, chronological,
                           [ts, open, high, low, close, volume].
 
-    Returns None if not enough candles yet (still PENDING) — caller
-    should skip and re-check next tick.
+    Returns None if not enough candles yet AND neither TP nor SL has been
+    touched — caller should keep this signal PENDING and re-check next
+    tick.
 
     Otherwise returns dict:
         status: "CORRECT" | "INCORRECT"
         exit_price: the price the outcome was determined at
-        mae_pct: max adverse excursion, % of entry
-        mfe_pct: max favorable excursion, % of entry
+        mae_pct: max adverse excursion, % of entry, over candles walked
+        mfe_pct: max favorable excursion, % of entry, over candles walked
     """
-    if not is_ready_to_evaluate(signal, candles_since_entry):
-        return None
-
-    window = candles_since_entry[: signal["evaluate_after_candles"]]
     entry = signal["entry_price"]
     action = signal["action"]
-    success_pct = signal["success_move_pct"]
+    tp = signal["take_profit"]
+    sl = signal["stop_loss"]
+    max_candles = signal["evaluate_after_candles"]
 
-    window_high, window_low = _window_high_low(window)
-    last_close = window[-1][4]
+    window = candles_since_entry[:max_candles]
+    mae_pct = 0.0
+    mfe_pct = 0.0
 
-    if action == "BUY":
-        target = entry * (1 + success_pct)
-        hit = window_high >= target
-        mfe_pct = ((window_high - entry) / entry) * 100
-        mae_pct = ((entry - window_low) / entry) * 100
-        exit_price = target if hit else last_close
-        status = "CORRECT" if hit else "INCORRECT"
+    for candle in window:
+        high, low = candle[2], candle[3]
 
-    elif action == "SELL":
-        target = entry * (1 - success_pct)
-        hit = window_low <= target
-        mfe_pct = ((entry - window_low) / entry) * 100
-        mae_pct = ((window_high - entry) / entry) * 100
-        exit_price = target if hit else last_close
-        status = "CORRECT" if hit else "INCORRECT"
+        if action == "BUY":
+            mfe_pct = max(mfe_pct, ((high - entry) / entry) * 100)
+            mae_pct = max(mae_pct, ((entry - low) / entry) * 100)
+            hit_tp = high >= tp
+            hit_sl = low <= sl
+        else:  # SELL
+            mfe_pct = max(mfe_pct, ((entry - low) / entry) * 100)
+            mae_pct = max(mae_pct, ((high - entry) / entry) * 100)
+            hit_tp = low <= tp
+            hit_sl = high >= sl
 
-    else:
-        # WAIT signals are never journaled in the first place, but guard
-        # against being called on one anyway.
-        return None
+        if hit_tp and hit_sl:
+            # Ambiguous within this candle — assume the worse outcome.
+            return {"status": "INCORRECT", "exit_price": round(sl, 8),
+                    "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
+        if hit_sl:
+            return {"status": "INCORRECT", "exit_price": round(sl, 8),
+                    "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
+        if hit_tp:
+            return {"status": "CORRECT", "exit_price": round(tp, 8),
+                    "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
 
-    return {
-        "status": status,
-        "exit_price": round(exit_price, 8),
-        "mae_pct": round(mae_pct, 4),
-        "mfe_pct": round(mfe_pct, 4),
-    }
+    # Neither level touched in the candles seen so far.
+    if len(window) >= max_candles:
+        last_close = window[-1][4]
+        return {"status": "INCORRECT", "exit_price": round(last_close, 8),
+                "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
+
+    return None  # still pending — not enough candles yet, no hit yet
 
 
 def candles_since(all_closed_candles, entry_timestamp_ms):
