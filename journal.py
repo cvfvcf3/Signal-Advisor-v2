@@ -2,6 +2,13 @@
 Signal journal: persists every generated signal (per symbol + per mode)
 to SQLite and tracks its eventual resolution (correct/incorrect/expired).
 
+PERSISTENCE: Railway (and most container hosts) wipe local container
+filesystem on every redeploy — a plain relative path here would silently
+lose all history each time new code is pushed. DB_PATH is therefore read
+from the DATA_DIR environment variable when set (point it at a Railway
+Volume's mount path, e.g. /data) and only falls back to a local ./data
+folder for local/dev runs where that isn't set up.
+
 CONCURRENCY: the Flask dashboard (request-driven) and the advisor_engine
 tick loop (background thread) both touch this database. To avoid
 "database is locked" errors under load:
@@ -29,7 +36,8 @@ import uuid
 import json
 from datetime import datetime, timezone
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "signals.db")
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
+DB_PATH = os.path.join(DATA_DIR, "signals.db")
 
 _write_lock = threading.Lock()
 
@@ -49,7 +57,7 @@ def _add_column_if_missing(conn, table, column, coltype):
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     with _write_lock:
         conn = _connect()
         try:
