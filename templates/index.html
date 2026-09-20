@@ -27,6 +27,11 @@
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 16px; margin-bottom: 12px; overflow-x: auto;
   }
+  .card-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .export-link {
+    color: var(--accent); text-decoration: none; font-size: 12px;
+    border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px;
+  }
   .signal-row { display: flex; justify-content: space-between; align-items: center; }
   .action { font-size: 22px; font-weight: 700; }
   .action.BUY { color: var(--bull); }
@@ -66,7 +71,10 @@
 <div class="subtitle">READ-ONLY · NO TRADING · Multi-coin, multi-mode</div>
 
 <div class="card">
-  <strong>All Signals (every coin, every mode)</strong>
+  <div class="card-header">
+    <strong>All Signals (every coin, every mode)</strong>
+    <a class="export-link" href="/api/export?format=csv" download>⬇ Export CSV</a>
+  </div>
   <table>
     <thead><tr><th>Time</th><th>Symbol</th><th>Mode</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
     <tbody id="allSignalsBody"></tbody>
@@ -104,7 +112,10 @@
 </div>
 
 <div class="card">
-  <strong>Signal Journal (selected coin/mode)</strong>
+  <div class="card-header">
+    <strong>Signal Journal (selected coin/mode)</strong>
+    <a class="export-link" id="exportFilteredLink" href="#" download>⬇ Export CSV</a>
+  </div>
   <table>
     <thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
     <tbody id="journalBody"></tbody>
@@ -165,6 +176,9 @@ async function refresh() {
   await refreshAllSignals();
 
   if (!symbol || !mode) return;
+
+  document.getElementById('exportFilteredLink').href =
+    `/api/export?format=csv&symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`;
 
   try {
     const sigRes = await fetch(`/api/current_signal?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);

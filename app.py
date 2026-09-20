@@ -4,7 +4,8 @@ Flask dashboard + JSON API. READ-ONLY: every route here only reads data
 modify, or cancel an exchange order — there is no such endpoint, and the
 one write-capable route (admin config reload) only ever touches scoring
 weights/thresholds/notification settings, never exchange credentials or
-trading behavior.
+trading behavior. The export routes are also read-only — they generate a
+CSV/JSON snapshot from the journal, never touch or clear it.
 
 create_app(advisor, config) is a factory so main.py can construct the
 Advisor once and hand it to Flask, rather than each module creating its
@@ -12,8 +13,11 @@ own instance.
 """
 
 import os
+import csv
+import io
+import json
 from datetime import datetime, timezone
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, Response
 
 import journal
 
@@ -66,6 +70,13 @@ def _validate_reload_payload(payload, config):
     return True, None
 
 
+CSV_COLUMNS = [
+    "signal_id", "created_at", "symbol", "mode", "action", "confidence",
+    "entry_price", "take_profit", "stop_loss", "status", "resolved_at",
+    "exit_price", "mae_pct", "mfe_pct",
+]
+
+
 def create_app(advisor, config):
     app = Flask(__name__)
 
@@ -109,6 +120,49 @@ def create_app(advisor, config):
     @app.route("/api/logs")
     def api_logs():
         return jsonify(list(reversed(ACTIVITY_LOG)))
+
+    @app.route("/api/export")
+    def api_export():
+        """
+        Read-only export of the full (or filtered) signal history.
+        ?format=csv (default) or ?format=json
+        ?symbol=... and ?mode=... optionally filter, same as /api/signals.
+        This only reads the journal — it never deletes or modifies it.
+        """
+        symbol = request.args.get("symbol")
+        mode = request.args.get("mode")
+        fmt = request.args.get("format", "csv").lower()
+
+        rows = journal.get_signal_history(symbol=symbol, mode=mode, limit=100000)
+        rows.sort(key=lambda r: r.get("created_at") or "")
+
+        if fmt == "json":
+            # Full detail including layers_snapshot for each signal.
+            for r in rows:
+                if isinstance(r.get("layers_snapshot"), str):
+                    try:
+                        r["layers_snapshot"] = json.loads(r["layers_snapshot"])
+                    except Exception:
+                        pass
+            body = json.dumps(rows, indent=2)
+            return Response(
+                body,
+                mimetype="application/json",
+                headers={"Content-Disposition": "attachment; filename=signal_history.json"},
+            )
+
+        # Default: CSV (layers_snapshot omitted — use format=json for that detail)
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+        return Response(
+            buffer.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment; filename=signal_history.csv"},
+        )
 
     @app.route("/api/admin/reload-config", methods=["POST"])
     def admin_reload_config():
