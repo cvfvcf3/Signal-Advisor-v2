@@ -4,12 +4,7 @@ Flask dashboard + JSON API. READ-ONLY: every route here only reads data
 modify, or cancel an exchange order — there is no such endpoint, and the
 one write-capable route (admin config reload) only ever touches scoring
 weights/thresholds/notification settings, never exchange credentials or
-trading behavior. The export routes are also read-only — they generate a
-CSV/JSON snapshot from the journal, never touch or clear it.
-
-create_app(advisor, config) is a factory so main.py can construct the
-Advisor once and hand it to Flask, rather than each module creating its
-own instance.
+trading behavior. The export/debug routes are also read-only.
 """
 
 import os
@@ -32,9 +27,6 @@ def log_activity(message):
         del ACTIVITY_LOG[: len(ACTIVITY_LOG) - MAX_LOG_ENTRIES]
 
 
-# Only these top-level sections, and only these fields within them, can be
-# changed via the admin reload endpoint. Anything else (exchange config,
-# symbols list, credentials, market_type, etc.) is rejected outright.
 ALLOWED_MODE_FIELDS = {"weights", "min_score_to_signal", "min_score_gap"}
 ALLOWED_TELEGRAM_FIELDS = {"enabled", "min_confidence_to_notify"}
 
@@ -121,6 +113,34 @@ def create_app(advisor, config):
     def api_logs():
         return jsonify(list(reversed(ACTIVITY_LOG)))
 
+    @app.route("/api/debug/storage")
+    def api_debug_storage():
+        """
+        Read-only diagnostic: shows exactly where the journal database is
+        being written, so persistence issues can be confirmed from the
+        browser instead of guessing. Reveals no secrets — just paths,
+        an env var name, and file metadata.
+        """
+        db_path = journal.DB_PATH
+        data_dir = journal.DATA_DIR
+        exists = os.path.exists(db_path)
+        info = {
+            "DATA_DIR_env_var_set": "DATA_DIR" in os.environ,
+            "DATA_DIR_value": os.environ.get("DATA_DIR", "(not set — using default local path)"),
+            "resolved_data_dir": data_dir,
+            "resolved_db_path": db_path,
+            "db_file_exists": exists,
+        }
+        if exists:
+            stat = os.stat(db_path)
+            info["db_file_size_bytes"] = stat.st_size
+            info["db_last_modified"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        try:
+            info["is_on_mounted_volume"] = os.path.ismount(data_dir) or os.path.ismount(os.path.dirname(data_dir))
+        except Exception:
+            info["is_on_mounted_volume"] = "unknown"
+        return jsonify(info)
+
     @app.route("/api/export")
     def api_export():
         """
@@ -137,7 +157,6 @@ def create_app(advisor, config):
         rows.sort(key=lambda r: r.get("created_at") or "")
 
         if fmt == "json":
-            # Full detail including layers_snapshot for each signal.
             for r in rows:
                 if isinstance(r.get("layers_snapshot"), str):
                     try:
@@ -151,7 +170,6 @@ def create_app(advisor, config):
                 headers={"Content-Disposition": "attachment; filename=signal_history.json"},
             )
 
-        # Default: CSV (layers_snapshot omitted — use format=json for that detail)
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=CSV_COLUMNS, extrasaction="ignore")
         writer.writeheader()
