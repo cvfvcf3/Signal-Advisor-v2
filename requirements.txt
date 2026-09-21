@@ -1,8 +1,8 @@
 flask==3.0.3
+gunicorn==22.0.0
 ccxt==4.3.78
 pandas==2.2.3
 numpy==1.26.4
 python-dotenv==1.0.1
 PyYAML==6.0.1
 requests==2.32.3
-gunicorn==22.0.0

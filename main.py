@@ -1,27 +1,17 @@
 """
-Entrypoint.
+Entrypoint. Exposes a module-level `app` so it works both:
+  - under a production WSGI server: `gunicorn main:app` (Railway's
+    Railpack builder auto-detects Flask and does this by default)
+  - run directly for local/dev: `python main.py`
 
-Production (Railway): served by gunicorn, e.g.
-    gunicorn main:flask_app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
-gunicorn imports this module and looks for the `flask_app` WSGI object —
-it never executes the `if __name__ == "__main__":` block. --workers 1 is
-required: the background tick loop below starts once at import time, and
-running more than one worker process would start multiple tick loops,
-each independently hitting the exchange and duplicating signals.
-
-Local/dev: `python main.py` runs this module as __main__, which starts
-the same background thread (module-level code always runs once on
-import/execution) and then serves via Flask's own dev server.
-
-Responsibilities:
-  1. Load .env and config.yaml.
-  2. Construct one Advisor instance (holds exchange client, cache,
-     market-structure tracker, journal access, in-memory readings).
-  3. Start a background thread that calls advisor.run_tick() then
-     telegram_notifier.send_pending_notifications() every
-     poll_interval_seconds — started at MODULE LEVEL so it runs
-     regardless of how this file is loaded (gunicorn or `python main.py`).
-  4. Expose flask_app (the dashboard) as a module-level WSGI object.
+IMPORTANT: only ONE gunicorn worker must be used (see Procfile:
+--workers 1). The background tick-loop thread is started once at module
+import time below — if gunicorn ran multiple worker PROCESSES, each
+would start its own independent tick loop, multiplying exchange API
+calls, duplicating journal writes, and duplicating Telegram
+notifications. Threads within the single worker are fine (Flask request
+handling + the tick-loop thread share one process safely, guarded by
+Advisor's internal lock and journal.py's SQLite write lock).
 """
 
 import os
@@ -41,7 +31,9 @@ import telegram_notifier
 import app as app_module
 
 advisor = Advisor(CONFIG)
-flask_app = app_module.create_app(advisor, CONFIG)
+
+# Module-level `app` — this is what `gunicorn main:app` looks for.
+app = app_module.create_app(advisor, CONFIG)
 
 
 def tick_loop():
@@ -57,11 +49,23 @@ def tick_loop():
         time.sleep(poll_interval)
 
 
-_tick_thread = threading.Thread(target=tick_loop, daemon=True)
-_tick_thread.start()
+_tick_thread_started = False
+
+
+def _start_tick_thread_once():
+    global _tick_thread_started
+    if not _tick_thread_started:
+        thread = threading.Thread(target=tick_loop, daemon=True)
+        thread.start()
+        _tick_thread_started = True
+
+
+# Runs once at import — whether imported by gunicorn or run as __main__.
+_start_tick_thread_once()
 
 
 if __name__ == "__main__":
-    # Local/dev only — Railway uses gunicorn (see module docstring).
+    # Local/dev fallback only. In production, gunicorn (see Procfile)
+    # imports this module and uses `app` directly without hitting this.
     port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)
