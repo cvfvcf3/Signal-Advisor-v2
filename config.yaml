@@ -31,9 +31,9 @@ modes:
     confirm_timeframes: ["5m", "15m"]
     min_score_to_signal: 65
     min_score_gap: 10
-    evaluation_candles: 15
-    success_move_pct: 0.003
-    stop_loss_pct: 0.002
+    evaluation_candles: 20
+    success_move_pct: 0.002
+    stop_loss_pct: 0.0013
     weights:
       technical: 20
       multi_timeframe: 15

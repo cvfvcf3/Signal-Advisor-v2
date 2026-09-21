@@ -1,5 +1,17 @@
 """
-Entrypoint. Run with: python main.py (or via Railway's start command).
+Entrypoint.
+
+Production (Railway): served by gunicorn, e.g.
+    gunicorn main:flask_app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+gunicorn imports this module and looks for the `flask_app` WSGI object —
+it never executes the `if __name__ == "__main__":` block. --workers 1 is
+required: the background tick loop below starts once at import time, and
+running more than one worker process would start multiple tick loops,
+each independently hitting the exchange and duplicating signals.
+
+Local/dev: `python main.py` runs this module as __main__, which starts
+the same background thread (module-level code always runs once on
+import/execution) and then serves via Flask's own dev server.
 
 Responsibilities:
   1. Load .env and config.yaml.
@@ -7,13 +19,9 @@ Responsibilities:
      market-structure tracker, journal access, in-memory readings).
   3. Start a background thread that calls advisor.run_tick() then
      telegram_notifier.send_pending_notifications() every
-     poll_interval_seconds.
-  4. Start the Flask dashboard (app.create_app) in the foreground.
-
-Both the background tick loop and Flask requests share the same Advisor
-instance and the same SQLite journal — safe because journal.py already
-handles WAL mode + a write lock, and Advisor's shared state is guarded by
-its own lock.
+     poll_interval_seconds — started at MODULE LEVEL so it runs
+     regardless of how this file is loaded (gunicorn or `python main.py`).
+  4. Expose flask_app (the dashboard) as a module-level WSGI object.
 """
 
 import os
@@ -49,9 +57,11 @@ def tick_loop():
         time.sleep(poll_interval)
 
 
-if __name__ == "__main__":
-    thread = threading.Thread(target=tick_loop, daemon=True)
-    thread.start()
+_tick_thread = threading.Thread(target=tick_loop, daemon=True)
+_tick_thread.start()
 
+
+if __name__ == "__main__":
+    # Local/dev only — Railway uses gunicorn (see module docstring).
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host="0.0.0.0", port=port)

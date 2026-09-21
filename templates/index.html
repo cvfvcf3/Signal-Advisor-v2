@@ -27,11 +27,6 @@
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 16px; margin-bottom: 12px; overflow-x: auto;
   }
-  .card-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .export-link {
-    color: var(--accent); text-decoration: none; font-size: 12px;
-    border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px;
-  }
   .signal-row { display: flex; justify-content: space-between; align-items: center; }
   .action { font-size: 22px; font-weight: 700; }
   .action.BUY { color: var(--bull); }
@@ -48,6 +43,8 @@
   table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; white-space: nowrap; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
+  tbody tr.clickable { cursor: pointer; }
+  tbody tr.clickable:active { background: #182028; }
   .badge { padding: 2px 6px; border-radius: 4px; font-size: 11px; }
   .badge.CORRECT { background: rgba(22,199,132,0.15); color: var(--bull); }
   .badge.INCORRECT { background: rgba(234,57,67,0.15); color: var(--bear); }
@@ -63,6 +60,12 @@
   .sl-text { color: var(--bear); }
   .layer-bar { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
   .log-line { font-size: 11px; color: var(--muted); padding: 3px 0; }
+  .detail-row td {
+    background: #0c1014; padding: 10px 12px; white-space: normal;
+  }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 11px; }
+  .detail-grid .lbl { color: var(--muted); }
+  .detail-close { float: right; color: var(--muted); font-size: 11px; }
 </style>
 </head>
 <body>
@@ -71,10 +74,8 @@
 <div class="subtitle">READ-ONLY · NO TRADING · Multi-coin, multi-mode</div>
 
 <div class="card">
-  <div class="card-header">
-    <strong>All Signals (every coin, every mode)</strong>
-    <a class="export-link" href="/api/export?format=csv" download>⬇ Export CSV</a>
-  </div>
+  <strong>All Signals (every coin, every mode)</strong>
+  <div class="subtitle" style="margin:4px 0 0;">Tap a row for layer detail</div>
   <table>
     <thead><tr><th>Time</th><th>Symbol</th><th>Mode</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
     <tbody id="allSignalsBody"></tbody>
@@ -107,15 +108,13 @@
 </div>
 
 <div class="card">
-  <strong>Layer Breakdown</strong>
+  <strong>Layer Breakdown (live)</strong>
   <div id="layerBreakdown"></div>
 </div>
 
 <div class="card">
-  <div class="card-header">
-    <strong>Signal Journal (selected coin/mode)</strong>
-    <a class="export-link" id="exportFilteredLink" href="#" download>⬇ Export CSV</a>
-  </div>
+  <strong>Signal Journal (selected coin/mode)</strong>
+  <div class="subtitle" style="margin:4px 0 0;">Tap a row for layer detail</div>
   <table>
     <thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
     <tbody id="journalBody"></tbody>
@@ -130,6 +129,10 @@
 <script>
 const symbolSelect = document.getElementById('symbolSelect');
 const modeSelect = document.getElementById('modeSelect');
+
+let allSignalsData = [];
+let journalData = [];
+let openDetailKey = null; // "all-3" or "journal-2" etc, tracks which row is expanded
 
 async function loadSymbols() {
   const res = await fetch('/api/symbols');
@@ -149,12 +152,69 @@ function fmtNum(n) {
   return n != null ? n : '--';
 }
 
+function parseLayers(row) {
+  if (!row.layers_snapshot) return null;
+  if (typeof row.layers_snapshot === 'object') return row.layers_snapshot;
+  try { return JSON.parse(row.layers_snapshot); } catch (e) { return null; }
+}
+
+function detailRowHtml(row, colspan) {
+  const layers = parseLayers(row);
+  let layersHtml = '<div class="subtitle">No layer detail saved</div>';
+  if (layers) {
+    layersHtml = Object.entries(layers).map(([name, r]) =>
+      `<div class="layer-bar"><span>${name}</span><span>bull ${r.bullish_score ?? '--'} / bear ${r.bearish_score ?? '--'}</span></div>`
+    ).join('');
+  }
+  const extra = (row.status === 'CORRECT' || row.status === 'INCORRECT') ? `
+    <div class="detail-grid" style="margin-top:8px;">
+      <div class="lbl">Exit price</div><div>${fmtNum(row.exit_price)}</div>
+      <div class="lbl">MAE %</div><div>${fmtNum(row.mae_pct)}</div>
+      <div class="lbl">MFE %</div><div>${fmtNum(row.mfe_pct)}</div>
+      <div class="lbl">Resolved at</div><div>${fmtTime(row.resolved_at)}</div>
+    </div>` : '';
+  return `<td colspan="${colspan}">
+      <span class="detail-close">tap row to close</span>
+      <strong>Layers at signal time</strong>
+      ${layersHtml}
+      ${extra}
+    </td>`;
+}
+
+function attachRowToggle(tbody, dataArr, keyPrefix, colspan) {
+  tbody.querySelectorAll('tr.clickable').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const idx = parseInt(tr.getAttribute('data-idx'), 10);
+      const key = keyPrefix + '-' + idx;
+      const existingDetail = tbody.querySelector('tr.detail-row[data-for="' + key + '"]');
+
+      // close any open detail row first
+      const openRow = tbody.querySelector('tr.detail-row');
+      if (openRow) openRow.remove();
+
+      if (openDetailKey === key) {
+        openDetailKey = null;
+        return; // was open, now just closed
+      }
+
+      const row = dataArr[idx];
+      const detailTr = document.createElement('tr');
+      detailTr.className = 'detail-row';
+      detailTr.setAttribute('data-for', key);
+      detailTr.innerHTML = detailRowHtml(row, colspan);
+      tr.after(detailTr);
+      openDetailKey = key;
+    });
+  });
+}
+
 async function refreshAllSignals() {
   try {
     const res = await fetch('/api/signals?limit=50');
-    const rows = await res.json();
-    document.getElementById('allSignalsBody').innerHTML = rows.map(row => `
-      <tr>
+    allSignalsData = await res.json();
+    const tbody = document.getElementById('allSignalsBody');
+    tbody.innerHTML = allSignalsData.map((row, idx) => `
+      <tr class="clickable" data-idx="${idx}">
         <td>${fmtTime(row.created_at)}</td>
         <td>${row.symbol}</td>
         <td><span class="mode-badge">${row.mode}</span></td>
@@ -166,6 +226,7 @@ async function refreshAllSignals() {
         <td><span class="badge ${row.status}">${row.status}</span></td>
       </tr>
     `).join('') || '<tr><td colspan="9" class="subtitle">No signals yet</td></tr>';
+    attachRowToggle(tbody, allSignalsData, 'all', 9);
   } catch (e) { console.error(e); }
 }
 
@@ -176,9 +237,6 @@ async function refresh() {
   await refreshAllSignals();
 
   if (!symbol || !mode) return;
-
-  document.getElementById('exportFilteredLink').href =
-    `/api/export?format=csv&symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`;
 
   try {
     const sigRes = await fetch(`/api/current_signal?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
@@ -210,18 +268,19 @@ async function refresh() {
 
   try {
     const histRes = await fetch(`/api/signals?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}&limit=20`);
-    const hist = await histRes.json();
+    journalData = await histRes.json();
 
-    if (hist.length > 0) {
-      document.getElementById('tpLabel').textContent = fmtNum(hist[0].take_profit);
-      document.getElementById('slLabel').textContent = fmtNum(hist[0].stop_loss);
+    if (journalData.length > 0) {
+      document.getElementById('tpLabel').textContent = fmtNum(journalData[0].take_profit);
+      document.getElementById('slLabel').textContent = fmtNum(journalData[0].stop_loss);
     } else {
       document.getElementById('tpLabel').textContent = '--';
       document.getElementById('slLabel').textContent = '--';
     }
 
-    document.getElementById('journalBody').innerHTML = hist.map(row => `
-      <tr>
+    const jbody = document.getElementById('journalBody');
+    jbody.innerHTML = journalData.map((row, idx) => `
+      <tr class="clickable" data-idx="${idx}">
         <td>${fmtTime(row.created_at)}</td>
         <td>${row.action}</td>
         <td>${row.confidence}</td>
@@ -231,6 +290,7 @@ async function refresh() {
         <td><span class="badge ${row.status}">${row.status}</span></td>
       </tr>
     `).join('');
+    attachRowToggle(jbody, journalData, 'journal', 7);
   } catch (e) { console.error(e); }
 
   try {
