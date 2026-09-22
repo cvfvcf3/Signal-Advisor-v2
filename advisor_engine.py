@@ -8,14 +8,17 @@ at startup (by main.py) and its run_tick() is called on a timer
   2. Loops over every (symbol, mode) combination, running all 5 layers,
      combining them into a composite score, applying the BTC macro-filter
      to altcoins, and deciding BUY/SELL/WAIT.
-  3. On a new BUY/SELL, computes take_profit and stop_loss price levels
-     from the mode's success_move_pct / stop_loss_pct, and records the
-     signal to the journal (with duplicate protection — a repeat of the
-     same still-pending action on the same symbol+mode is not
-     re-recorded/re-notified).
+  3. On a new BUY/SELL: computes a volatility-adaptive take_profit/
+     stop_loss (target% = max(success_move_pct, atr_multiplier * ATR14%),
+     stop% = target% / rr) so a fixed target isn't unrealistically tight
+     in a quiet market or unrealistically loose in a volatile one. Then
+     records the signal to the journal, guarded by both duplicate
+     protection (same pending action) and a per-mode cooldown (won't
+     re-fire on the same symbol+mode within cooldown_minutes of the last
+     signal, even if that one already resolved).
   4. Evaluates any previously-PENDING signals against newly-closed
-     candles (path-aware TP/SL check — see evaluator.py) and resolves
-     them.
+     candles (path-aware TP/SL/EXPIRED check — see evaluator.py) and
+     resolves them.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
@@ -26,7 +29,7 @@ scores are based on confirmed price action only and don't flicker.
 """
 
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from exchange_client import ExchangeClient
 from cache import TTLCache
@@ -166,29 +169,59 @@ class Advisor:
             self.last_readings[(symbol, mode_name)] = reading
 
         if decision["action"] in ("BUY", "SELL"):
-            self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores)
+            self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv)
 
-    def _compute_tp_sl(self, action, entry_price, mode_cfg):
-        success_pct = mode_cfg["success_move_pct"]
-        stop_pct = mode_cfg["stop_loss_pct"]
+    def _compute_tp_sl(self, action, entry_price, mode_cfg, primary_ohlcv):
+        """
+        Adaptive target: target_pct = max(success_move_pct, atr_multiplier * ATR14%)
+        so the target isn't unrealistically tight in a quiet market or
+        unrealistically loose in a volatile one. Stop distance is derived
+        from the target via the mode's risk:reward ratio (rr), so R:R
+        stays consistent even as the target itself adapts.
+        """
+        atr_mult = self.config.get("adaptive_target", {}).get("atr_multiplier", 1.4)
+        atr_pct_value = technical.atr_pct(primary_ohlcv, period=14)
+
+        target_pct = max(mode_cfg["success_move_pct"], atr_mult * atr_pct_value)
+        stop_pct = target_pct / mode_cfg["rr"]
 
         if action == "BUY":
-            take_profit = entry_price * (1 + success_pct)
+            take_profit = entry_price * (1 + target_pct)
             stop_loss = entry_price * (1 - stop_pct)
         else:  # SELL
-            take_profit = entry_price * (1 - success_pct)
+            take_profit = entry_price * (1 - target_pct)
             stop_loss = entry_price * (1 + stop_pct)
 
         return round(take_profit, 8), round(stop_loss, 8)
 
-    def _maybe_record_signal(self, symbol, mode_name, decision, entry_price, mode_cfg, layer_scores):
+    def _cooldown_active(self, symbol, mode_name, cooldown_minutes):
+        """True if the last signal for this symbol+mode (any status) was
+        created within the last cooldown_minutes — prevents rapid re-firing
+        right after a signal resolves."""
+        if not cooldown_minutes:
+            return False
+        last = journal.get_last_signal(symbol, mode_name)
+        if not last:
+            return False
+        last_created = datetime.fromisoformat(last["created_at"])
+        if last_created.tzinfo is None:
+            last_created = last_created.replace(tzinfo=timezone.utc)
+        elapsed = datetime.now(timezone.utc) - last_created
+        return elapsed < timedelta(minutes=cooldown_minutes)
+
+    def _maybe_record_signal(self, symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv):
         """Duplicate protection: don't re-record/re-notify the same action
-        while the previous signal for this symbol+mode is still PENDING."""
+        while the previous signal for this symbol+mode is still PENDING.
+        Cooldown: also skip if the last signal (any status) fired too
+        recently, even if it already resolved."""
         last = journal.get_last_signal(symbol, mode_name)
         if last and last["action"] == decision["action"] and last["status"] == "PENDING":
             return
 
-        take_profit, stop_loss = self._compute_tp_sl(decision["action"], entry_price, mode_cfg)
+        if self._cooldown_active(symbol, mode_name, mode_cfg.get("cooldown_minutes")):
+            return
+
+        take_profit, stop_loss = self._compute_tp_sl(decision["action"], entry_price, mode_cfg, primary_ohlcv)
 
         signal_id = journal.record_signal(
             symbol=symbol,

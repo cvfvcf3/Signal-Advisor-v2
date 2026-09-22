@@ -11,6 +11,10 @@ orderbook, market_structure, smc), all of which must also output on a
 Only uses CLOSED candles: the caller must pass OHLCV data that excludes
 the still-forming candle, so scores don't flicker as the current candle
 updates.
+
+Also exposes atr_pct(), used by advisor_engine.py for volatility-adaptive
+TP/SL sizing (a fixed % target can be unrealistically tight in a quiet
+market and unrealistically loose in a volatile one).
 """
 
 import pandas as pd
@@ -52,6 +56,37 @@ def _macd(series, fast=12, slow=26, signal=9):
     signal_line = _ema(macd_line, signal)
     hist = macd_line - signal_line
     return macd_line, signal_line, hist
+
+
+def atr_pct(ohlcv, period=14):
+    """
+    Simple (non-Wilder-smoothed) ATR over `period` closed candles,
+    expressed as a percentage of the latest close. Used to size TP/SL
+    distances relative to how much the market is actually moving right
+    now, instead of a single fixed percentage for all conditions.
+
+    Returns 0.0 if there isn't enough data.
+    """
+    if len(ohlcv) < period + 2:
+        return 0.0
+
+    df = _to_dataframe(ohlcv)
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    atr_value = tr.rolling(period).mean().iloc[-1]
+    last_close = close.iloc[-1]
+
+    if pd.isna(atr_value) or last_close <= 0:
+        return 0.0
+
+    return float(atr_value / last_close)
 
 
 def analyze(ohlcv, ema_fast_period=9, ema_slow_period=21):
@@ -124,10 +159,10 @@ def analyze(ohlcv, ema_fast_period=9, ema_slow_period=21):
     # 3) RSI
     rsi = _rsi(close).iloc[-1]
     if rsi < 30:
-        bullish += W_RSI  # oversold -> bullish bias
+        bullish += W_RSI
         details["rsi"] = f"oversold({rsi:.1f})"
     elif rsi > 70:
-        bearish += W_RSI  # overbought -> bearish bias
+        bearish += W_RSI
         details["rsi"] = f"overbought({rsi:.1f})"
     elif rsi > 50:
         bullish += W_RSI * 0.4

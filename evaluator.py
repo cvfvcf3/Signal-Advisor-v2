@@ -1,6 +1,6 @@
 """
 Evaluator: checks PENDING journal signals against subsequent CLOSED
-candles and resolves them to CORRECT / INCORRECT.
+candles and resolves them to CORRECT / INCORRECT / EXPIRED.
 
 PATH-AWARE RESOLUTION: each candle since entry is walked in chronological
 order. Whichever level — take_profit or stop_loss — is touched FIRST
@@ -14,9 +14,15 @@ the conservative assumption is that STOP-LOSS was hit first — this avoids
 overstating accuracy on wide-range candles where the true intra-candle
 order is unknown from OHLC data alone.
 
-If neither level is touched within `evaluate_after_candles` candles, the
-signal resolves INCORRECT at the last available close (the move never
-materialized within the intended window) — not left ambiguous.
+EXPIRED vs INCORRECT: if neither TP nor SL is touched within
+`evaluate_after_candles` candles, the signal resolves EXPIRED (NOT
+INCORRECT) at the last available close. A setup that never got stopped
+out but also never reached its target is a different failure mode than
+one that reversed hard against the position — collapsing them into a
+single "INCORRECT" bucket hides that distinction and makes accuracy
+stats harder to act on. EXPIRED is excluded from the accuracy
+percentage (journal.get_accuracy only divides CORRECT / (CORRECT +
+INCORRECT)), but still shown as its own count.
 
 MAE / MFE are accumulated across all candles actually walked (up to the
 resolution point or the end of the window), as a % of entry price.
@@ -44,7 +50,7 @@ def evaluate_signal(signal, candles_since_entry):
     tick.
 
     Otherwise returns dict:
-        status: "CORRECT" | "INCORRECT"
+        status: "CORRECT" | "INCORRECT" | "EXPIRED"
         exit_price: the price the outcome was determined at
         mae_pct: max adverse excursion, % of entry, over candles walked
         mfe_pct: max favorable excursion, % of entry, over candles walked
@@ -73,11 +79,8 @@ def evaluate_signal(signal, candles_since_entry):
             hit_tp = low <= tp
             hit_sl = high >= sl
 
-        if hit_tp and hit_sl:
-            # Ambiguous within this candle — assume the worse outcome.
-            return {"status": "INCORRECT", "exit_price": round(sl, 8),
-                    "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
         if hit_sl:
+            # Whether SL-only or both-in-one-candle: conservative outcome.
             return {"status": "INCORRECT", "exit_price": round(sl, 8),
                     "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
         if hit_tp:
@@ -87,7 +90,7 @@ def evaluate_signal(signal, candles_since_entry):
     # Neither level touched in the candles seen so far.
     if len(window) >= max_candles:
         last_close = window[-1][4]
-        return {"status": "INCORRECT", "exit_price": round(last_close, 8),
+        return {"status": "EXPIRED", "exit_price": round(last_close, 8),
                 "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
 
     return None  # still pending — not enough candles yet, no hit yet

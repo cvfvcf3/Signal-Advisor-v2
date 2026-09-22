@@ -25,15 +25,21 @@ btc_macro_filter:
     buy_multiplier: 0.50
     sell_multiplier: 1.15
 
+# Adaptive target: actual target used = max(success_move_pct, atr_multiplier * ATR14%)
+# so a fixed target isn't unrealistically tight/loose vs current volatility.
+adaptive_target:
+  atr_multiplier: 1.4
+
 modes:
   scalp:
-    primary_timeframe: "1m"
-    confirm_timeframes: ["5m", "15m"]
+    primary_timeframe: "5m"
+    confirm_timeframes: ["15m", "1h"]
     min_score_to_signal: 65
     min_score_gap: 10
-    evaluation_candles: 20
+    evaluation_candles: 12
     success_move_pct: 0.002
-    stop_loss_pct: 0.0013
+    rr: 1.5
+    cooldown_minutes: 20
     weights:
       technical: 20
       multi_timeframe: 15
@@ -49,7 +55,8 @@ modes:
     min_score_gap: 12
     evaluation_candles: 20
     success_move_pct: 0.01
-    stop_loss_pct: 0.006
+    rr: 1.67
+    cooldown_minutes: 90
     weights:
       technical: 35
       multi_timeframe: 25
@@ -64,7 +71,8 @@ modes:
     min_score_gap: 15
     evaluation_candles: 30
     success_move_pct: 0.03
-    stop_loss_pct: 0.018
+    rr: 1.67
+    cooldown_minutes: 360
     weights:
       technical: 25
       multi_timeframe: 35
