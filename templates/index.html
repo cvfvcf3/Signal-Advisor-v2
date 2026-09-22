@@ -27,6 +27,12 @@
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
     padding: 16px; margin-bottom: 12px; overflow-x: auto;
   }
+  .card-header-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .export-links { display: flex; gap: 12px; }
+  .export-link {
+    color: var(--accent); font-size: 12px; text-decoration: none; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 4px;
+  }
   .signal-row { display: flex; justify-content: space-between; align-items: center; }
   .action { font-size: 22px; font-weight: 700; }
   .action.BUY { color: var(--bull); }
@@ -74,7 +80,13 @@
 <div class="subtitle">READ-ONLY · NO TRADING · Multi-coin, multi-mode</div>
 
 <div class="card">
-  <strong>All Signals (every coin, every mode)</strong>
+  <div class="card-header-row">
+    <strong>All Signals (every coin, every mode)</strong>
+    <div class="export-links">
+      <a class="export-link" href="/api/export?format=csv" download>⬇ Export CSV</a>
+      <a class="export-link" href="/api/export?format=json" download>⬇ Export JSON</a>
+    </div>
+  </div>
   <div class="subtitle" style="margin:4px 0 0;">Tap a row for layer detail</div>
   <table>
     <thead><tr><th>Time</th><th>Symbol</th><th>Mode</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
@@ -113,7 +125,10 @@
 </div>
 
 <div class="card">
-  <strong>Signal Journal (selected coin/mode)</strong>
+  <div class="card-header-row">
+    <strong>Signal Journal (selected coin/mode)</strong>
+    <div class="export-links" id="filteredExportLinks"></div>
+  </div>
   <div class="subtitle" style="margin:4px 0 0;">Tap a row for layer detail</div>
   <table>
     <thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
@@ -132,7 +147,7 @@ const modeSelect = document.getElementById('modeSelect');
 
 let allSignalsData = [];
 let journalData = [];
-let openDetailKey = null; // "all-3" or "journal-2" etc, tracks which row is expanded
+let openDetailKey = null;
 
 async function loadSymbols() {
   const res = await fetch('/api/symbols');
@@ -186,15 +201,13 @@ function attachRowToggle(tbody, dataArr, keyPrefix, colspan) {
     tr.addEventListener('click', () => {
       const idx = parseInt(tr.getAttribute('data-idx'), 10);
       const key = keyPrefix + '-' + idx;
-      const existingDetail = tbody.querySelector('tr.detail-row[data-for="' + key + '"]');
 
-      // close any open detail row first
       const openRow = tbody.querySelector('tr.detail-row');
       if (openRow) openRow.remove();
 
       if (openDetailKey === key) {
         openDetailKey = null;
-        return; // was open, now just closed
+        return;
       }
 
       const row = dataArr[idx];
@@ -237,6 +250,12 @@ async function refresh() {
   await refreshAllSignals();
 
   if (!symbol || !mode) return;
+
+  const filteredLinks = document.getElementById('filteredExportLinks');
+  filteredLinks.innerHTML = `
+    <a class="export-link" href="/api/export?format=csv&symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}" download>⬇ CSV</a>
+    <a class="export-link" href="/api/export?format=json&symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}" download>⬇ JSON</a>
+  `;
 
   try {
     const sigRes = await fetch(`/api/current_signal?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
