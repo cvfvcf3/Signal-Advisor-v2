@@ -1,4 +1,5 @@
 import os
+import time
 import ccxt
 import yaml
 
@@ -6,6 +7,24 @@ import yaml
 def _load_config():
     with open(os.path.join(os.path.dirname(__file__), "config.yaml"), "r") as f:
         return yaml.safe_load(f)
+
+
+def _with_retry(fn, retries=1, delay_seconds=1.5):
+    """
+    Runs fn() and retries once (by default) on any exception before
+    giving up. Meant for transient network hiccups against the exchange
+    API — a single retry recovers most of these without masking a
+    persistent failure (which will still raise after the retry).
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                time.sleep(delay_seconds)
+    raise last_exc
 
 
 class ExchangeClient:
@@ -29,11 +48,6 @@ class ExchangeClient:
             "rateLimit": ex_cfg.get("rate_limit_ms", 250),
             "options": {
                 "defaultType": "future" if ex_cfg.get("market_type") == "future" else "spot",
-                # Skip ccxt's automatic fetchCurrencies() call during
-                # loadMarkets(). That call hits a wallet/SAPI endpoint we
-                # don't need (we only read public market data), and it can
-                # be geo-restricted (HTTP 451) even when the market-data
-                # endpoints we actually use are not.
                 "fetchCurrencies": False,
                 "warnOnFetchOpenOrdersWithoutSymbol": False,
             },
@@ -41,31 +55,31 @@ class ExchangeClient:
 
     def fetch_ohlcv(self, symbol, timeframe, limit=200):
         """Returns list of [timestamp, open, high, low, close, volume]."""
-        return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        return _with_retry(lambda: self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit))
 
     def fetch_order_book(self, symbol, limit=50):
-        return self.exchange.fetch_order_book(symbol, limit=limit)
+        return _with_retry(lambda: self.exchange.fetch_order_book(symbol, limit=limit))
 
     def fetch_ticker(self, symbol):
-        return self.exchange.fetch_ticker(symbol)
+        return _with_retry(lambda: self.exchange.fetch_ticker(symbol))
 
     def fetch_tickers_bulk(self, symbols=None):
         """Bulk ticker fetch where the exchange supports it — reduces the
         number of per-symbol API calls needed each tick."""
         if not self.exchange.has.get("fetchTickers"):
             return None
-        return self.exchange.fetch_tickers(symbols)
+        return _with_retry(lambda: self.exchange.fetch_tickers(symbols))
 
     def fetch_funding_rate(self, symbol):
         """Futures only. Returns latest funding rate info, or None if the
         exchange/market doesn't support it."""
         if not self.exchange.has.get("fetchFundingRate"):
             return None
-        return self.exchange.fetch_funding_rate(symbol)
+        return _with_retry(lambda: self.exchange.fetch_funding_rate(symbol))
 
     def fetch_open_interest(self, symbol):
         """Futures only. Returns current open interest, or None if
         unsupported."""
         if not self.exchange.has.get("fetchOpenInterest"):
             return None
-        return self.exchange.fetch_open_interest(symbol)
+        return _with_retry(lambda: self.exchange.fetch_open_interest(symbol))

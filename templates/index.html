@@ -42,10 +42,12 @@
   .tp-sl-row { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
   .tp-sl-row .tp { color: var(--bull); }
   .tp-sl-row .sl { color: var(--bear); }
-  .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+  .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
   .stat { background: #0f1318; border-radius: 8px; padding: 8px; text-align: center; }
   .stat .label { color: var(--muted); font-size: 11px; }
   .stat .value { font-size: 16px; font-weight: 600; }
+  .stat .value.positive { color: var(--bull); }
+  .stat .value.negative { color: var(--bear); }
   table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; white-space: nowrap; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
@@ -118,6 +120,8 @@
     <div class="stat"><div class="label">Incorrect</div><div class="value" id="statIncorrect">--</div></div>
     <div class="stat"><div class="label">Expired</div><div class="value" id="statExpired">--</div></div>
     <div class="stat"><div class="label">Accuracy</div><div class="value" id="statAccuracy">--</div></div>
+    <div class="stat"><div class="label">Total P&L%</div><div class="value" id="statTotalPnl">--</div></div>
+    <div class="stat"><div class="label">Avg P&L%/trade</div><div class="value" id="statAvgPnl">--</div></div>
   </div>
 </div>
 
@@ -169,6 +173,17 @@ function fmtNum(n) {
   return n != null ? n : '--';
 }
 
+function fmtPct(n) {
+  if (n == null) return '--';
+  const sign = n > 0 ? '+' : '';
+  return sign + n + '%';
+}
+
+function pnlClass(n) {
+  if (n == null) return '';
+  return n > 0 ? 'positive' : (n < 0 ? 'negative' : '');
+}
+
 function parseLayers(row) {
   if (!row.layers_snapshot) return null;
   if (typeof row.layers_snapshot === 'object') return row.layers_snapshot;
@@ -186,6 +201,7 @@ function detailRowHtml(row, colspan) {
   const extra = (row.status === 'CORRECT' || row.status === 'INCORRECT' || row.status === 'EXPIRED') ? `
     <div class="detail-grid" style="margin-top:8px;">
       <div class="lbl">Exit price</div><div>${fmtNum(row.exit_price)}</div>
+      <div class="lbl">P&L %</div><div>${fmtPct(row.pnl_pct)}</div>
       <div class="lbl">MAE %</div><div>${fmtNum(row.mae_pct)}</div>
       <div class="lbl">MFE %</div><div>${fmtNum(row.mfe_pct)}</div>
       <div class="lbl">Resolved at</div><div>${fmtTime(row.resolved_at)}</div>
@@ -286,6 +302,14 @@ async function refresh() {
     document.getElementById('statIncorrect').textContent = acc.incorrect ?? '--';
     document.getElementById('statExpired').textContent = acc.expired ?? '--';
     document.getElementById('statAccuracy').textContent = acc.accuracy_pct != null ? acc.accuracy_pct + '%' : '--';
+
+    const totalEl = document.getElementById('statTotalPnl');
+    totalEl.textContent = fmtPct(acc.total_pnl_pct);
+    totalEl.className = 'value ' + pnlClass(acc.total_pnl_pct);
+
+    const avgEl = document.getElementById('statAvgPnl');
+    avgEl.textContent = fmtPct(acc.avg_pnl_pct);
+    avgEl.className = 'value ' + pnlClass(acc.avg_pnl_pct);
   } catch (e) { console.error(e); }
 
   try {

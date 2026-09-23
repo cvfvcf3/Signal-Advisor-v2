@@ -18,11 +18,18 @@ EXPIRED vs INCORRECT: if neither TP nor SL is touched within
 `evaluate_after_candles` candles, the signal resolves EXPIRED (NOT
 INCORRECT) at the last available close. A setup that never got stopped
 out but also never reached its target is a different failure mode than
-one that reversed hard against the position — collapsing them into a
-single "INCORRECT" bucket hides that distinction and makes accuracy
-stats harder to act on. EXPIRED is excluded from the accuracy
-percentage (journal.get_accuracy only divides CORRECT / (CORRECT +
-INCORRECT)), but still shown as its own count.
+one that reversed hard against the position. EXPIRED is excluded from
+the accuracy percentage (journal.get_accuracy only divides CORRECT /
+(CORRECT + INCORRECT)), but still shown as its own count.
+
+PNL: every resolution (CORRECT, INCORRECT, or EXPIRED) also computes
+pnl_pct — the actual % price move from entry to exit_price, signed for
+the trade direction. This is deliberately uniform across all three
+statuses: an EXPIRED trade's exit is just whatever the last candle's
+close was, and that can still be a real (small) profit or loss even
+though neither target nor stop was touched. Treating EXPIRED as "no
+result" would hide that a real position, had one been taken, would have
+closed somewhere — usually near flat, but not exactly zero.
 
 MAE / MFE are accumulated across all candles actually walked (up to the
 resolution point or the end of the window), as a % of entry price.
@@ -30,6 +37,13 @@ resolution point or the end of the window), as a % of entry price.
 This only ever evaluates against CLOSED candles the caller supplies —
 it never estimates or assumes future price action.
 """
+
+
+def _pnl_pct(action, entry, exit_price):
+    if action == "BUY":
+        return ((exit_price - entry) / entry) * 100
+    else:  # SELL
+        return ((entry - exit_price) / entry) * 100
 
 
 def is_ready_to_evaluate(signal, candles_since_entry):
@@ -52,6 +66,7 @@ def evaluate_signal(signal, candles_since_entry):
     Otherwise returns dict:
         status: "CORRECT" | "INCORRECT" | "EXPIRED"
         exit_price: the price the outcome was determined at
+        pnl_pct: signed % move from entry to exit_price (trade-direction aware)
         mae_pct: max adverse excursion, % of entry, over candles walked
         mfe_pct: max favorable excursion, % of entry, over candles walked
     """
@@ -80,17 +95,19 @@ def evaluate_signal(signal, candles_since_entry):
             hit_sl = high >= sl
 
         if hit_sl:
-            # Whether SL-only or both-in-one-candle: conservative outcome.
             return {"status": "INCORRECT", "exit_price": round(sl, 8),
+                    "pnl_pct": round(_pnl_pct(action, entry, sl), 4),
                     "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
         if hit_tp:
             return {"status": "CORRECT", "exit_price": round(tp, 8),
+                    "pnl_pct": round(_pnl_pct(action, entry, tp), 4),
                     "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
 
     # Neither level touched in the candles seen so far.
     if len(window) >= max_candles:
         last_close = window[-1][4]
         return {"status": "EXPIRED", "exit_price": round(last_close, 8),
+                "pnl_pct": round(_pnl_pct(action, entry, last_close), 4),
                 "mae_pct": round(mae_pct, 4), "mfe_pct": round(mfe_pct, 4)}
 
     return None  # still pending — not enough candles yet, no hit yet

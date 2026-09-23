@@ -10,15 +10,14 @@ at startup (by main.py) and its run_tick() is called on a timer
      to altcoins, and deciding BUY/SELL/WAIT.
   3. On a new BUY/SELL: computes a volatility-adaptive take_profit/
      stop_loss (target% = max(success_move_pct, atr_multiplier * ATR14%),
-     stop% = target% / rr) so a fixed target isn't unrealistically tight
-     in a quiet market or unrealistically loose in a volatile one. Then
-     records the signal to the journal, guarded by both duplicate
-     protection (same pending action) and a per-mode cooldown (won't
-     re-fire on the same symbol+mode within cooldown_minutes of the last
-     signal, even if that one already resolved).
+     stop% = target% / rr). Then records the signal to the journal,
+     guarded by both duplicate protection (same pending action) and a
+     per-mode cooldown (won't re-fire on the same symbol+mode within
+     cooldown_minutes of the last signal, even if that one already
+     resolved).
   4. Evaluates any previously-PENDING signals against newly-closed
-     candles (path-aware TP/SL/EXPIRED check — see evaluator.py) and
-     resolves them.
+     candles (path-aware TP/SL/EXPIRED check, with pnl_pct — see
+     evaluator.py) and resolves them.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
@@ -131,8 +130,6 @@ class Advisor:
 
         weights = dict(mode_cfg["weights"])
 
-        # Scalp-mode SMC noise control: cap SMC weight unless HTF trend
-        # agrees with the SMC-implied direction.
         cap = mode_cfg.get("smc_weight_cap_if_htf_disagrees")
         if cap is not None and weights.get("smc", 0) > cap:
             mtf = layer_scores["multi_timeframe"]
@@ -172,13 +169,6 @@ class Advisor:
             self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv)
 
     def _compute_tp_sl(self, action, entry_price, mode_cfg, primary_ohlcv):
-        """
-        Adaptive target: target_pct = max(success_move_pct, atr_multiplier * ATR14%)
-        so the target isn't unrealistically tight in a quiet market or
-        unrealistically loose in a volatile one. Stop distance is derived
-        from the target via the mode's risk:reward ratio (rr), so R:R
-        stays consistent even as the target itself adapts.
-        """
         atr_mult = self.config.get("adaptive_target", {}).get("atr_multiplier", 1.4)
         atr_pct_value = technical.atr_pct(primary_ohlcv, period=14)
 
@@ -195,9 +185,6 @@ class Advisor:
         return round(take_profit, 8), round(stop_loss, 8)
 
     def _cooldown_active(self, symbol, mode_name, cooldown_minutes):
-        """True if the last signal for this symbol+mode (any status) was
-        created within the last cooldown_minutes — prevents rapid re-firing
-        right after a signal resolves."""
         if not cooldown_minutes:
             return False
         last = journal.get_last_signal(symbol, mode_name)
@@ -210,10 +197,6 @@ class Advisor:
         return elapsed < timedelta(minutes=cooldown_minutes)
 
     def _maybe_record_signal(self, symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv):
-        """Duplicate protection: don't re-record/re-notify the same action
-        while the previous signal for this symbol+mode is still PENDING.
-        Cooldown: also skip if the last signal (any status) fired too
-        recently, even if it already resolved."""
         last = journal.get_last_signal(symbol, mode_name)
         if last and last["action"] == decision["action"] and last["status"] == "PENDING":
             return
@@ -267,7 +250,7 @@ class Advisor:
                 if result is not None:
                     journal.resolve_signal(
                         sig["signal_id"], result["status"], result["exit_price"],
-                        result["mae_pct"], result["mfe_pct"],
+                        result["mae_pct"], result["mfe_pct"], result.get("pnl_pct"),
                     )
             except Exception as e:
                 print(f"[evaluator error] {sig.get('symbol')}/{sig.get('mode')}: {e}")
@@ -284,8 +267,6 @@ class Advisor:
                 try:
                     self._process_symbol_mode(symbol, mode_name, btc_regime, btc_symbol)
                 except Exception as e:
-                    # Per-symbol/mode error isolation — one failure must
-                    # not stop the rest of the tick.
                     print(f"[tick error] {symbol}/{mode_name}: {e}")
                     continue
 
@@ -300,8 +281,6 @@ class Advisor:
             return dict(self.last_readings)
 
     def pop_pending_notifications(self):
-        """Drains and returns signals awaiting Telegram notification.
-        Called by telegram_notifier after each tick."""
         with self._lock:
             items = self._pending_notifications
             self._pending_notifications = []

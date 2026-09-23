@@ -4,10 +4,11 @@ Flask dashboard + JSON API. READ-ONLY: every route here only reads data
 modify, or cancel an exchange order — there is no such endpoint, and the
 one write-capable route (admin config reload) only ever touches scoring
 weights/thresholds/notification settings, never exchange credentials or
-trading behavior. The export/debug/detail routes are also read-only.
+trading behavior. The export/debug/health routes are also read-only.
 """
 
 import os
+import hmac
 import csv
 import io
 import json
@@ -65,7 +66,7 @@ def _validate_reload_payload(payload, config):
 CSV_COLUMNS = [
     "signal_id", "created_at", "symbol", "mode", "action", "confidence",
     "entry_price", "take_profit", "stop_loss", "status", "resolved_at",
-    "exit_price", "mae_pct", "mfe_pct",
+    "exit_price", "pnl_pct", "mae_pct", "mfe_pct",
 ]
 
 
@@ -79,6 +80,34 @@ def create_app(advisor, config):
             symbols=config["symbols"],
             modes=config["active_modes"],
         )
+
+    @app.route("/api/health")
+    def api_health():
+        """
+        Basic liveness check: process is up, DB is reachable, and when
+        the tick loop last ran. Useful for Railway's healthcheck feature
+        or just eyeballing from a browser.
+        """
+        last_tick_time = None
+        last_tick_ok = None
+        for entry in reversed(ACTIVITY_LOG):
+            if "tick completed" in entry["message"] or "tick error" in entry["message"]:
+                last_tick_time = entry["time"]
+                last_tick_ok = "tick completed" in entry["message"]
+                break
+
+        db_reachable = True
+        try:
+            journal.get_accuracy()
+        except Exception:
+            db_reachable = False
+
+        return jsonify({
+            "status": "ok" if db_reachable else "degraded",
+            "db_reachable": db_reachable,
+            "last_tick_time": last_tick_time,
+            "last_tick_ok": last_tick_ok,
+        })
 
     @app.route("/api/symbols")
     def api_symbols():
@@ -103,30 +132,6 @@ def create_app(advisor, config):
         limit = int(request.args.get("limit", 50))
         return jsonify(journal.get_signal_history(symbol=symbol, mode=mode, limit=limit))
 
-    @app.route("/api/signal/<signal_id>")
-    def api_signal_detail(signal_id):
-        """
-        Read-only detail for ONE signal, including its full layers_snapshot
-        (what each layer's bullish/bearish score was at the moment the
-        signal was generated) — used by the dashboard's per-signal detail
-        view to show why a resolved signal was correct/incorrect.
-        """
-        # get_signal_history has no single-id lookup, so pull a generous
-        # page and find it — the journal is small enough for this to be
-        # cheap, and it avoids adding a new journal.py function for now.
-        rows = journal.get_signal_history(limit=100000)
-        match = next((r for r in rows if r["signal_id"] == signal_id), None)
-        if not match:
-            return jsonify({"error": "not found"}), 404
-
-        if isinstance(match.get("layers_snapshot"), str):
-            try:
-                match["layers_snapshot"] = json.loads(match["layers_snapshot"])
-            except Exception:
-                pass
-
-        return jsonify(match)
-
     @app.route("/api/accuracy")
     def api_accuracy():
         symbol = request.args.get("symbol")
@@ -139,7 +144,6 @@ def create_app(advisor, config):
 
     @app.route("/api/debug/storage")
     def api_debug_storage():
-        """Read-only diagnostic showing exactly where the journal DB lives."""
         db_path = journal.DB_PATH
         data_dir = journal.DATA_DIR
         exists = os.path.exists(db_path)
@@ -162,7 +166,6 @@ def create_app(advisor, config):
 
     @app.route("/api/export")
     def api_export():
-        """Read-only export. ?format=csv (default) or ?format=json."""
         symbol = request.args.get("symbol")
         mode = request.args.get("mode")
         fmt = request.args.get("format", "csv").lower()
@@ -202,7 +205,9 @@ def create_app(advisor, config):
         expected = os.environ.get(token_env, "")
         provided = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
 
-        if not expected or provided != expected:
+        # Constant-time comparison: avoids leaking how many leading
+        # characters matched via response-timing differences.
+        if not expected or not hmac.compare_digest(provided, expected):
             return jsonify({"error": "unauthorized"}), 401
 
         payload = request.get_json(silent=True) or {}
