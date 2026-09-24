@@ -1,10 +1,10 @@
 """
 Flask dashboard + JSON API. READ-ONLY: every route here only reads data
-(advisor's in-memory readings, or the journal). Nothing here can place,
-modify, or cancel an exchange order — there is no such endpoint, and the
-one write-capable route (admin config reload) only ever touches scoring
-weights/thresholds/notification settings, never exchange credentials or
-trading behavior. The export/debug/health routes are also read-only.
+(advisor's in-memory readings, or the journal, or the simulated paper
+balances). Nothing here can place, modify, or cancel a real exchange
+order — there is no such endpoint. Paper trading balances are purely
+simulated numbers this app tracks itself; they never touch a real
+account.
 """
 
 import os
@@ -66,7 +66,8 @@ def _validate_reload_payload(payload, config):
 CSV_COLUMNS = [
     "signal_id", "created_at", "symbol", "mode", "action", "confidence",
     "entry_price", "take_profit", "stop_loss", "status", "resolved_at",
-    "exit_price", "pnl_pct", "mae_pct", "mfe_pct",
+    "exit_price", "pnl_pct", "dollar_pnl", "position_size_usd",
+    "mae_pct", "mfe_pct",
 ]
 
 
@@ -83,11 +84,6 @@ def create_app(advisor, config):
 
     @app.route("/api/health")
     def api_health():
-        """
-        Basic liveness check: process is up, DB is reachable, and when
-        the tick loop last ran. Useful for Railway's healthcheck feature
-        or just eyeballing from a browser.
-        """
         last_tick_time = None
         last_tick_ok = None
         for entry in reversed(ACTIVITY_LOG):
@@ -138,6 +134,40 @@ def create_app(advisor, config):
         mode = request.args.get("mode")
         return jsonify(journal.get_accuracy(symbol=symbol, mode=mode))
 
+    @app.route("/api/paper_balance")
+    def api_paper_balance():
+        """
+        Simulated paper-trading balance(s). ?mode=scalp for one mode, or
+        omit for all three. Purely a simulated number this app tracks
+        itself — never a real exchange balance.
+        """
+        mode = request.args.get("mode")
+        starting_balance = config.get("paper_trading", {}).get("starting_balance", 1000)
+
+        if mode:
+            balance = journal.get_paper_balance(mode, starting_balance)
+            all_rows = journal.get_all_paper_balances()
+            row = all_rows.get(mode, {})
+            return jsonify({
+                "mode": mode,
+                "starting_balance": starting_balance,
+                "current_balance": round(balance, 2),
+                "total_dollar_pnl": round(balance - starting_balance, 2),
+                "trade_count": row.get("trade_count", 0),
+            })
+
+        all_rows = journal.get_all_paper_balances()
+        result = {}
+        for m in config.get("active_modes", []):
+            bal = all_rows.get(m, {}).get("balance", starting_balance)
+            result[m] = {
+                "starting_balance": starting_balance,
+                "current_balance": round(bal, 2),
+                "total_dollar_pnl": round(bal - starting_balance, 2),
+                "trade_count": all_rows.get(m, {}).get("trade_count", 0),
+            }
+        return jsonify(result)
+
     @app.route("/api/logs")
     def api_logs():
         return jsonify(list(reversed(ACTIVITY_LOG)))
@@ -149,7 +179,7 @@ def create_app(advisor, config):
         exists = os.path.exists(db_path)
         info = {
             "DATA_DIR_env_var_set": "DATA_DIR" in os.environ,
-            "DATA_DIR_value": os.environ.get("DATA_DIR", "(not set — using default local path)"),
+            "DATA_DIR_value": os.environ.get("DATA_DIR", "(not set)"),
             "resolved_data_dir": data_dir,
             "resolved_db_path": db_path,
             "db_file_exists": exists,
@@ -205,8 +235,6 @@ def create_app(advisor, config):
         expected = os.environ.get(token_env, "")
         provided = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
 
-        # Constant-time comparison: avoids leaking how many leading
-        # characters matched via response-timing differences.
         if not expected or not hmac.compare_digest(provided, expected):
             return jsonify({"error": "unauthorized"}), 401
 

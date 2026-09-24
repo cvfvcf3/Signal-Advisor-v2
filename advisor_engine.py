@@ -3,28 +3,35 @@ Advisor engine: the central orchestrator. One Advisor instance is created
 at startup (by main.py) and its run_tick() is called on a timer
 (poll_interval_seconds). Each tick:
 
-  1. Determines BTC's HTF regime (bullish/bearish/neutral) once, since
-     every altcoin's score depends on it.
+  1. Determines BTC's HTF regime (bullish/bearish/neutral) once.
   2. Loops over every (symbol, mode) combination, running all 5 layers,
      combining them into a composite score, applying the BTC macro-filter
      to altcoins, and deciding BUY/SELL/WAIT.
-  3. On a new BUY/SELL: computes a volatility-adaptive take_profit/
-     stop_loss (target% = max(success_move_pct, atr_multiplier * ATR14%),
-     stop% = target% / rr). Then records the signal to the journal,
-     guarded by both duplicate protection (same pending action) and a
-     per-mode cooldown (won't re-fire on the same symbol+mode within
-     cooldown_minutes of the last signal, even if that one already
-     resolved).
-  4. Evaluates any previously-PENDING signals against newly-closed
-     candles (path-aware TP/SL/EXPIRED check, with pnl_pct — see
-     evaluator.py) and resolves them.
+  3. On a new BUY/SELL: checks max_concurrent_positions for that mode
+     (skips if already at the cap), computes a volatility-adaptive
+     take_profit/stop_loss, and records the signal — guarded by
+     duplicate protection and a per-mode cooldown.
+  4. Evaluates PENDING signals two ways, in order:
+       a. Price-action outcome via evaluator.evaluate_signal (path-aware
+          TP/SL/trailing/EXPIRED check against newly-closed candles).
+       b. If still open, INVALIDATION: compares the pending signal's
+          original direction against this tick's freshly-computed live
+          reading for that same (symbol, mode). If the live composite
+          has flipped hard enough to now itself imply the opposite
+          action (gap >= mode's min_score_gap), the position is closed
+          early as INVALIDATED at the current price — this is a risk-
+          management exit for when the original thesis reverses, rather
+          than waiting for a fixed stop-loss or timeout. Guarded by a
+          minimum signal age (10 minutes) to avoid first-tick noise.
+     Either way, once resolved, computes the paper-trading dollar P&L
+     for that mode's simulated balance (see config.yaml paper_trading)
+     and persists everything together.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
 
 CLOSED CANDLES ONLY: _get_closed_ohlcv always drops the most recent
-(potentially still-forming) candle before handing data to any layer, so
-scores are based on confirmed price action only and don't flicker.
+(potentially still-forming) candle before handing data to any layer.
 """
 
 import threading
@@ -38,6 +45,8 @@ from scoring import composite_score, determine_btc_regime, apply_btc_macro_filte
 import journal
 import evaluator
 
+MIN_SIGNAL_AGE_MINUTES_FOR_INVALIDATION = 10
+
 
 class Advisor:
     def __init__(self, config):
@@ -49,8 +58,8 @@ class Advisor:
         )
 
         self._lock = threading.Lock()
-        self.last_readings = {}          # (symbol, mode) -> reading dict, for dashboard
-        self._pending_notifications = [] # list of signal dicts awaiting telegram_notifier
+        self.last_readings = {}
+        self._pending_notifications = []
 
         journal.init_db()
 
@@ -63,7 +72,7 @@ class Advisor:
         )
         if not raw or len(raw) < 2:
             return []
-        return raw[:-1]  # drop the still-forming last candle
+        return raw[:-1]
 
     def _get_order_book(self, symbol):
         key = f"orderbook:{symbol}"
@@ -105,7 +114,7 @@ class Advisor:
 
         primary_ohlcv = self._get_closed_ohlcv(symbol, primary_tf, limit=200)
         if len(primary_ohlcv) < 60:
-            return  # not enough closed candles yet to score meaningfully
+            return
 
         confirm_ohlcv = {tf: self._get_closed_ohlcv(symbol, tf, limit=100) for tf in confirm_tfs}
         order_book = self._get_order_book(symbol)
@@ -129,7 +138,6 @@ class Advisor:
         }
 
         weights = dict(mode_cfg["weights"])
-
         cap = mode_cfg.get("smc_weight_cap_if_htf_disagrees")
         if cap is not None and weights.get("smc", 0) > cap:
             mtf = layer_scores["multi_timeframe"]
@@ -178,7 +186,7 @@ class Advisor:
         if action == "BUY":
             take_profit = entry_price * (1 + target_pct)
             stop_loss = entry_price * (1 - stop_pct)
-        else:  # SELL
+        else:
             take_profit = entry_price * (1 - target_pct)
             stop_loss = entry_price * (1 + stop_pct)
 
@@ -203,6 +211,12 @@ class Advisor:
 
         if self._cooldown_active(symbol, mode_name, mode_cfg.get("cooldown_minutes")):
             return
+
+        max_concurrent = mode_cfg.get("max_concurrent_positions")
+        if max_concurrent is not None:
+            open_count = journal.get_open_positions_count(mode_name)
+            if open_count >= max_concurrent:
+                return
 
         take_profit, stop_loss = self._compute_tp_sl(decision["action"], entry_price, mode_cfg, primary_ohlcv)
 
@@ -232,6 +246,72 @@ class Advisor:
                 "layers": layer_scores,
             })
 
+    # ---------- invalidation (thesis-reversal early exit) ----------
+
+    def _check_invalidation(self, sig):
+        """Returns an evaluator-style result dict if the signal's live
+        reading has reversed hard enough to invalidate it, else None."""
+        entry_dt = datetime.fromisoformat(sig["created_at"])
+        if entry_dt.tzinfo is None:
+            entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+        age_minutes = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60
+        if age_minutes < MIN_SIGNAL_AGE_MINUTES_FOR_INVALIDATION:
+            return None
+
+        current = self.get_reading(sig["symbol"], sig["mode"])
+        if current is None:
+            return None
+
+        mode_cfg = self.config["modes"][sig["mode"]]
+        gap = mode_cfg["min_score_gap"]
+        action = sig["action"]
+        reversed_hard = False
+
+        if action == "BUY" and (current["bearish_score"] - current["bullish_score"]) >= gap:
+            reversed_hard = True
+        elif action == "SELL" and (current["bullish_score"] - current["bearish_score"]) >= gap:
+            reversed_hard = True
+
+        if not reversed_hard:
+            return None
+
+        exit_price = current["entry_price"]  # latest close used for this tick's reading
+        entry = sig["entry_price"]
+        return {
+            "status": "INVALIDATED",
+            "exit_price": round(exit_price, 8),
+            "pnl_pct": round(evaluator.pnl_pct(action, entry, exit_price), 4),
+            "mae_pct": None,
+            "mfe_pct": None,
+        }
+
+    # ---------- paper trading ----------
+
+    def _apply_paper_trading(self, sig, result):
+        paper_cfg = self.config.get("paper_trading", {})
+        if not paper_cfg.get("enabled", True) or result.get("pnl_pct") is None:
+            return None, None
+
+        starting_balance = paper_cfg.get("starting_balance", 1000)
+        risk_pct = paper_cfg.get("risk_pct_per_trade", 1.0)
+
+        current_balance = journal.get_paper_balance(sig["mode"], starting_balance)
+
+        entry = sig["entry_price"]
+        stop_loss = sig["stop_loss"]
+        stop_distance_pct = abs(entry - stop_loss) / entry if entry else 0
+
+        if stop_distance_pct <= 0:
+            return None, None
+
+        dollar_risk = current_balance * (risk_pct / 100)
+        position_size_usd = dollar_risk / stop_distance_pct
+        dollar_pnl = position_size_usd * (result["pnl_pct"] / 100)
+
+        journal.apply_paper_pnl(sig["mode"], dollar_pnl, starting_balance)
+
+        return round(dollar_pnl, 4), round(position_size_usd, 2)
+
     # ---------- evaluation of pending signals ----------
 
     def _evaluate_pending(self):
@@ -246,11 +326,17 @@ class Advisor:
                 entry_ts_ms = int(entry_dt.timestamp() * 1000)
 
                 since = evaluator.candles_since(all_candles, entry_ts_ms)
-                result = evaluator.evaluate_signal(sig, since)
+                result = evaluator.evaluate_signal(sig, since, trailing_cfg=mode_cfg.get("trailing"))
+
+                if result is None:
+                    result = self._check_invalidation(sig)
+
                 if result is not None:
+                    dollar_pnl, position_size_usd = self._apply_paper_trading(sig, result)
                     journal.resolve_signal(
                         sig["signal_id"], result["status"], result["exit_price"],
                         result["mae_pct"], result["mfe_pct"], result.get("pnl_pct"),
+                        dollar_pnl, position_size_usd,
                     )
             except Exception as e:
                 print(f"[evaluator error] {sig.get('symbol')}/{sig.get('mode')}: {e}")

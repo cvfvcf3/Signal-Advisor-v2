@@ -8,7 +8,7 @@
   :root {
     --bg: #0b0e11; --panel: #12161b; --border: #23282f;
     --text: #e8ecef; --muted: #8b95a1;
-    --bull: #16c784; --bear: #ea3943; --accent: #f0b90b;
+    --bull: #16c784; --bear: #ea3943; --accent: #f0b90b; --info: #58a6ff;
   }
   * { box-sizing: border-box; }
   body {
@@ -18,10 +18,18 @@
   }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
-  .selectors { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+  .tab-btn {
+    flex: 1; background: var(--panel); color: var(--muted); border: 1px solid var(--border);
+    padding: 10px 8px; border-radius: 8px; font-size: 13px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .tab-btn.active { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+  .mode-panel { display: none; }
+  .mode-panel.active { display: block; }
   select {
     background: var(--panel); color: var(--text); border: 1px solid var(--border);
-    padding: 8px 12px; border-radius: 6px; font-size: 14px;
+    padding: 8px 12px; border-radius: 6px; font-size: 14px; margin-bottom: 12px;
   }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -33,6 +41,11 @@
     color: var(--accent); font-size: 12px; text-decoration: none; font-weight: 600;
     display: inline-flex; align-items: center; gap: 4px;
   }
+  .balance-row { display: flex; justify-content: space-between; align-items: baseline; }
+  .balance-value { font-size: 26px; font-weight: 700; }
+  .balance-value.positive { color: var(--bull); }
+  .balance-value.negative { color: var(--bear); }
+  .balance-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .signal-row { display: flex; justify-content: space-between; align-items: center; }
   .action { font-size: 22px; font-weight: 700; }
   .action.BUY { color: var(--bull); }
@@ -58,10 +71,7 @@
   .badge.INCORRECT { background: rgba(234,57,67,0.15); color: var(--bear); }
   .badge.PENDING { background: rgba(240,185,11,0.15); color: var(--accent); }
   .badge.EXPIRED { background: rgba(139,149,161,0.15); color: var(--muted); }
-  .mode-badge {
-    background: #1c2128; border: 1px solid var(--border); border-radius: 4px;
-    padding: 1px 6px; font-size: 10px; color: var(--muted); text-transform: uppercase;
-  }
+  .badge.INVALIDATED { background: rgba(88,166,255,0.15); color: var(--info); }
   .action-text { font-weight: 600; }
   .action-text.BUY { color: var(--bull); }
   .action-text.SELL { color: var(--bear); }
@@ -69,9 +79,7 @@
   .sl-text { color: var(--bear); }
   .layer-bar { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); }
   .log-line { font-size: 11px; color: var(--muted); padding: 3px 0; }
-  .detail-row td {
-    background: #0c1014; padding: 10px 12px; white-space: normal;
-  }
+  .detail-row td { background: #0c1014; padding: 10px 12px; white-space: normal; }
   .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 11px; }
   .detail-grid .lbl { color: var(--muted); }
   .detail-close { float: right; color: var(--muted); font-size: 11px; }
@@ -80,67 +88,11 @@
 <body>
 
 <h1>Signal Advisor v2</h1>
-<div class="subtitle">READ-ONLY · NO TRADING · Multi-coin, multi-mode</div>
+<div class="subtitle">READ-ONLY · NO TRADING · Paper balances are simulated only</div>
 
-<div class="card">
-  <div class="card-header-row">
-    <strong>All Signals (every coin, every mode)</strong>
-    <div class="export-links">
-      <a class="export-link" href="/api/export?format=csv" download>⬇ Export CSV</a>
-      <a class="export-link" href="/api/export?format=json" download>⬇ Export JSON</a>
-    </div>
-  </div>
-  <div class="subtitle" style="margin:4px 0 0;">Tap a row for layer detail</div>
-  <table>
-    <thead><tr><th>Time</th><th>Symbol</th><th>Mode</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
-    <tbody id="allSignalsBody"></tbody>
-  </table>
-</div>
+<div class="tabs" id="modeTabs"></div>
 
-<div class="subtitle" style="margin-top: 4px;">Detail view for one coin/mode:</div>
-<div class="selectors">
-  <select id="symbolSelect"></select>
-  <select id="modeSelect"></select>
-</div>
-
-<div class="card">
-  <div class="signal-row">
-    <div>
-      <div class="action" id="actionLabel">--</div>
-      <div class="subtitle" id="entryLabel">entry: --</div>
-      <div class="tp-sl-row">
-        <span class="tp">TP: <span id="tpLabel">--</span></span>
-        <span class="sl">SL: <span id="slLabel">--</span></span>
-      </div>
-    </div>
-    <div class="confidence" id="confidenceLabel">--</div>
-  </div>
-  <div class="stat-grid">
-    <div class="stat"><div class="label">Correct</div><div class="value" id="statCorrect">--</div></div>
-    <div class="stat"><div class="label">Incorrect</div><div class="value" id="statIncorrect">--</div></div>
-    <div class="stat"><div class="label">Expired</div><div class="value" id="statExpired">--</div></div>
-    <div class="stat"><div class="label">Accuracy</div><div class="value" id="statAccuracy">--</div></div>
-    <div class="stat"><div class="label">Total P&L%</div><div class="value" id="statTotalPnl">--</div></div>
-    <div class="stat"><div class="label">Avg P&L%/trade</div><div class="value" id="statAvgPnl">--</div></div>
-  </div>
-</div>
-
-<div class="card">
-  <strong>Layer Breakdown (live)</strong>
-  <div id="layerBreakdown"></div>
-</div>
-
-<div class="card">
-  <div class="card-header-row">
-    <strong>Signal Journal (selected coin/mode)</strong>
-    <div class="export-links" id="filteredExportLinks"></div>
-  </div>
-  <div class="subtitle" style="margin:4px 0 0;">Tap a row for layer detail</div>
-  <table>
-    <thead><tr><th>Time</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>Status</th></tr></thead>
-    <tbody id="journalBody"></tbody>
-  </table>
-</div>
+<div id="panelsContainer"></div>
 
 <div class="card">
   <strong>Activity Log</strong>
@@ -148,40 +100,122 @@
 </div>
 
 <script>
-const symbolSelect = document.getElementById('symbolSelect');
-const modeSelect = document.getElementById('modeSelect');
+const MODES = {{ modes | tojson }};
+const SYMBOLS = {{ symbols | tojson }};
 
-let allSignalsData = [];
-let journalData = [];
-let openDetailKey = null;
-
-async function loadSymbols() {
-  const res = await fetch('/api/symbols');
-  const data = await res.json();
-  symbolSelect.innerHTML = data.symbols.map(s => `<option value="${s}">${s}</option>`).join('');
-  modeSelect.innerHTML = data.modes.map(m => `<option value="${m}">${m}</option>`).join('');
-  refresh();
-}
+let activeMode = MODES[0];
+let openDetailKey = {};   // per-mode currently open detail row key
+let journalDataByMode = {}; // per-mode last-fetched signal rows (for detail expand)
 
 function fmtTime(iso) {
   if (!iso) return '--';
-  const d = new Date(iso);
-  return d.toLocaleTimeString();
+  return new Date(iso).toLocaleTimeString();
 }
-
-function fmtNum(n) {
-  return n != null ? n : '--';
-}
-
+function fmtNum(n) { return n != null ? n : '--'; }
 function fmtPct(n) {
   if (n == null) return '--';
-  const sign = n > 0 ? '+' : '';
-  return sign + n + '%';
+  return (n > 0 ? '+' : '') + n + '%';
 }
-
+function fmtUsd(n) {
+  if (n == null) return '--';
+  return (n > 0 ? '+$' : (n < 0 ? '-$' : '$')) + Math.abs(n).toFixed(2);
+}
 function pnlClass(n) {
   if (n == null) return '';
   return n > 0 ? 'positive' : (n < 0 ? 'negative' : '');
+}
+
+function buildTabs() {
+  const tabsDiv = document.getElementById('modeTabs');
+  tabsDiv.innerHTML = MODES.map(m =>
+    `<button class="tab-btn${m === activeMode ? ' active' : ''}" data-mode="${m}">${m}</button>`
+  ).join('');
+  tabsDiv.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeMode = btn.getAttribute('data-mode');
+      buildTabs();
+      showActivePanel();
+    });
+  });
+}
+
+function showActivePanel() {
+  document.querySelectorAll('.mode-panel').forEach(p => {
+    p.classList.toggle('active', p.id === 'panel-' + activeMode);
+  });
+}
+
+function buildPanels() {
+  const container = document.getElementById('panelsContainer');
+  container.innerHTML = MODES.map(mode => `
+    <div class="mode-panel${mode === activeMode ? ' active' : ''}" id="panel-${mode}">
+
+      <div class="card">
+        <strong>Paper Balance — ${mode} (simulated)</strong>
+        <div class="balance-row" style="margin-top:8px;">
+          <div>
+            <div class="balance-value" id="balCurrent-${mode}">--</div>
+            <div class="balance-sub" id="balStart-${mode}">start: --</div>
+          </div>
+          <div style="text-align:right;">
+            <div class="balance-value" id="balPnl-${mode}" style="font-size:18px;">--</div>
+            <div class="balance-sub" id="balTrades-${mode}">-- trades</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header-row">
+          <strong>${mode} — All Coins</strong>
+          <div class="export-links">
+            <a class="export-link" href="/api/export?format=csv&mode=${mode}" download>⬇ CSV</a>
+            <a class="export-link" href="/api/export?format=json&mode=${mode}" download>⬇ JSON</a>
+          </div>
+        </div>
+        <div class="stat-grid">
+          <div class="stat"><div class="label">Correct</div><div class="value" id="statCorrect-${mode}">--</div></div>
+          <div class="stat"><div class="label">Incorrect</div><div class="value" id="statIncorrect-${mode}">--</div></div>
+          <div class="stat"><div class="label">Expired</div><div class="value" id="statExpired-${mode}">--</div></div>
+          <div class="stat"><div class="label">Invalidated</div><div class="value" id="statInvalidated-${mode}">--</div></div>
+          <div class="stat"><div class="label">Accuracy</div><div class="value" id="statAccuracy-${mode}">--</div></div>
+          <div class="stat"><div class="label">Avg P&L%</div><div class="value" id="statAvgPnl-${mode}">--</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <strong>Live reading</strong>
+        <select id="symbolSelect-${mode}"></select>
+        <div class="signal-row">
+          <div>
+            <div class="action" id="actionLabel-${mode}">--</div>
+            <div class="subtitle" id="entryLabel-${mode}">entry: --</div>
+            <div class="tp-sl-row">
+              <span class="tp">TP: <span id="tpLabel-${mode}">--</span></span>
+              <span class="sl">SL: <span id="slLabel-${mode}">--</span></span>
+            </div>
+          </div>
+          <div class="confidence" id="confidenceLabel-${mode}">--</div>
+        </div>
+        <div id="layerBreakdown-${mode}" style="margin-top:8px;"></div>
+      </div>
+
+      <div class="card">
+        <strong>Signal Journal — ${mode}</strong>
+        <div class="subtitle" style="margin:4px 0 0;">Tap a row for layer detail</div>
+        <table>
+          <thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th>Conf</th><th>Entry</th><th>TP</th><th>SL</th><th>P&L%</th><th>$P&L</th><th>Status</th></tr></thead>
+          <tbody id="journalBody-${mode}"></tbody>
+        </table>
+      </div>
+
+    </div>
+  `).join('');
+
+  MODES.forEach(mode => {
+    const sel = document.getElementById('symbolSelect-' + mode);
+    sel.innerHTML = SYMBOLS.map(s => `<option value="${s}">${s}</option>`).join('');
+    sel.addEventListener('change', () => refreshLiveReading(mode));
+  });
 }
 
 function parseLayers(row) {
@@ -198,10 +232,13 @@ function detailRowHtml(row, colspan) {
       `<div class="layer-bar"><span>${name}</span><span>bull ${r.bullish_score ?? '--'} / bear ${r.bearish_score ?? '--'}</span></div>`
     ).join('');
   }
-  const extra = (row.status === 'CORRECT' || row.status === 'INCORRECT' || row.status === 'EXPIRED') ? `
+  const resolved = ['CORRECT','INCORRECT','EXPIRED','INVALIDATED'].includes(row.status);
+  const extra = resolved ? `
     <div class="detail-grid" style="margin-top:8px;">
       <div class="lbl">Exit price</div><div>${fmtNum(row.exit_price)}</div>
       <div class="lbl">P&L %</div><div>${fmtPct(row.pnl_pct)}</div>
+      <div class="lbl">$ P&L</div><div>${fmtUsd(row.dollar_pnl)}</div>
+      <div class="lbl">Position size</div><div>${row.position_size_usd != null ? '$' + row.position_size_usd : '--'}</div>
       <div class="lbl">MAE %</div><div>${fmtNum(row.mae_pct)}</div>
       <div class="lbl">MFE %</div><div>${fmtNum(row.mfe_pct)}</div>
       <div class="lbl">Resolved at</div><div>${fmtTime(row.resolved_at)}</div>
@@ -214,78 +251,48 @@ function detailRowHtml(row, colspan) {
     </td>`;
 }
 
-function attachRowToggle(tbody, dataArr, keyPrefix, colspan) {
+function attachRowToggle(mode, tbody, dataArr, colspan) {
   tbody.querySelectorAll('tr.clickable').forEach(tr => {
     tr.addEventListener('click', () => {
       const idx = parseInt(tr.getAttribute('data-idx'), 10);
-      const key = keyPrefix + '-' + idx;
+      const key = mode + '-' + idx;
 
       const openRow = tbody.querySelector('tr.detail-row');
       if (openRow) openRow.remove();
 
-      if (openDetailKey === key) {
-        openDetailKey = null;
+      if (openDetailKey[mode] === key) {
+        openDetailKey[mode] = null;
         return;
       }
 
       const row = dataArr[idx];
       const detailTr = document.createElement('tr');
       detailTr.className = 'detail-row';
-      detailTr.setAttribute('data-for', key);
       detailTr.innerHTML = detailRowHtml(row, colspan);
       tr.after(detailTr);
-      openDetailKey = key;
+      openDetailKey[mode] = key;
     });
   });
 }
 
-async function refreshAllSignals() {
+async function refreshLiveReading(mode) {
+  const symbol = document.getElementById('symbolSelect-' + mode).value;
+  if (!symbol) return;
   try {
-    const res = await fetch('/api/signals?limit=50');
-    allSignalsData = await res.json();
-    const tbody = document.getElementById('allSignalsBody');
-    tbody.innerHTML = allSignalsData.map((row, idx) => `
-      <tr class="clickable" data-idx="${idx}">
-        <td>${fmtTime(row.created_at)}</td>
-        <td>${row.symbol}</td>
-        <td><span class="mode-badge">${row.mode}</span></td>
-        <td><span class="action-text ${row.action}">${row.action}</span></td>
-        <td>${row.confidence}</td>
-        <td>${row.entry_price}</td>
-        <td class="tp-text">${fmtNum(row.take_profit)}</td>
-        <td class="sl-text">${fmtNum(row.stop_loss)}</td>
-        <td><span class="badge ${row.status}">${row.status}</span></td>
-      </tr>
-    `).join('') || '<tr><td colspan="9" class="subtitle">No signals yet</td></tr>';
-    attachRowToggle(tbody, allSignalsData, 'all', 9);
-  } catch (e) { console.error(e); }
-}
-
-async function refresh() {
-  const symbol = symbolSelect.value;
-  const mode = modeSelect.value;
-
-  await refreshAllSignals();
-
-  if (!symbol || !mode) return;
-
-  const filteredLinks = document.getElementById('filteredExportLinks');
-  filteredLinks.innerHTML = `
-    <a class="export-link" href="/api/export?format=csv&symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}" download>⬇ CSV</a>
-    <a class="export-link" href="/api/export?format=json&symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}" download>⬇ JSON</a>
-  `;
-
-  try {
-    const sigRes = await fetch(`/api/current_signal?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
-    const sig = await sigRes.json();
-
-    const actionEl = document.getElementById('actionLabel');
+    const res = await fetch(`/api/current_signal?symbol=${encodeURIComponent(symbol)}&mode=${mode}`);
+    const sig = await res.json();
+    const actionEl = document.getElementById('actionLabel-' + mode);
     actionEl.textContent = sig.action || '--';
     actionEl.className = 'action ' + (sig.action || '');
-    document.getElementById('confidenceLabel').textContent = sig.confidence != null ? sig.confidence : '--';
-    document.getElementById('entryLabel').textContent = 'entry: ' + (sig.entry_price != null ? sig.entry_price : '--');
+    document.getElementById('confidenceLabel-' + mode).textContent = sig.confidence ?? '--';
+    document.getElementById('entryLabel-' + mode).textContent = 'entry: ' + (sig.entry_price ?? '--');
 
-    const layersDiv = document.getElementById('layerBreakdown');
+    const journalRows = journalDataByMode[mode] || [];
+    const latestForSymbol = journalRows.find(r => r.symbol === symbol);
+    document.getElementById('tpLabel-' + mode).textContent = latestForSymbol ? fmtNum(latestForSymbol.take_profit) : '--';
+    document.getElementById('slLabel-' + mode).textContent = latestForSymbol ? fmtNum(latestForSymbol.stop_loss) : '--';
+
+    const layersDiv = document.getElementById('layerBreakdown-' + mode);
     if (sig.layers) {
       layersDiv.innerHTML = Object.entries(sig.layers).map(([name, r]) =>
         `<div class="layer-bar"><span>${name}</span><span>bull ${r.bullish_score} / bear ${r.bearish_score}</span></div>`
@@ -294,51 +301,65 @@ async function refresh() {
       layersDiv.innerHTML = '<div class="subtitle">No reading yet</div>';
     }
   } catch (e) { console.error(e); }
+}
 
+async function refreshModePanel(mode) {
   try {
-    const accRes = await fetch(`/api/accuracy?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}`);
+    const accRes = await fetch(`/api/accuracy?mode=${mode}`);
     const acc = await accRes.json();
-    document.getElementById('statCorrect').textContent = acc.correct ?? '--';
-    document.getElementById('statIncorrect').textContent = acc.incorrect ?? '--';
-    document.getElementById('statExpired').textContent = acc.expired ?? '--';
-    document.getElementById('statAccuracy').textContent = acc.accuracy_pct != null ? acc.accuracy_pct + '%' : '--';
-
-    const totalEl = document.getElementById('statTotalPnl');
-    totalEl.textContent = fmtPct(acc.total_pnl_pct);
-    totalEl.className = 'value ' + pnlClass(acc.total_pnl_pct);
-
-    const avgEl = document.getElementById('statAvgPnl');
+    document.getElementById('statCorrect-' + mode).textContent = acc.correct ?? '--';
+    document.getElementById('statIncorrect-' + mode).textContent = acc.incorrect ?? '--';
+    document.getElementById('statExpired-' + mode).textContent = acc.expired ?? '--';
+    document.getElementById('statInvalidated-' + mode).textContent = acc.invalidated ?? '--';
+    document.getElementById('statAccuracy-' + mode).textContent = acc.accuracy_pct != null ? acc.accuracy_pct + '%' : '--';
+    const avgEl = document.getElementById('statAvgPnl-' + mode);
     avgEl.textContent = fmtPct(acc.avg_pnl_pct);
     avgEl.className = 'value ' + pnlClass(acc.avg_pnl_pct);
   } catch (e) { console.error(e); }
 
   try {
-    const histRes = await fetch(`/api/signals?symbol=${encodeURIComponent(symbol)}&mode=${encodeURIComponent(mode)}&limit=20`);
-    journalData = await histRes.json();
+    const balRes = await fetch(`/api/paper_balance?mode=${mode}`);
+    const bal = await balRes.json();
+    const curEl = document.getElementById('balCurrent-' + mode);
+    curEl.textContent = '$' + bal.current_balance;
+    curEl.className = 'balance-value ' + pnlClass(bal.total_dollar_pnl);
+    document.getElementById('balStart-' + mode).textContent = 'start: $' + bal.starting_balance;
+    const pnlEl = document.getElementById('balPnl-' + mode);
+    pnlEl.textContent = fmtUsd(bal.total_dollar_pnl);
+    pnlEl.className = 'balance-value ' + pnlClass(bal.total_dollar_pnl);
+    document.getElementById('balTrades-' + mode).textContent = bal.trade_count + ' trades';
+  } catch (e) { console.error(e); }
 
-    if (journalData.length > 0) {
-      document.getElementById('tpLabel').textContent = fmtNum(journalData[0].take_profit);
-      document.getElementById('slLabel').textContent = fmtNum(journalData[0].stop_loss);
-    } else {
-      document.getElementById('tpLabel').textContent = '--';
-      document.getElementById('slLabel').textContent = '--';
-    }
+  try {
+    const histRes = await fetch(`/api/signals?mode=${mode}&limit=50`);
+    const rows = await histRes.json();
+    journalDataByMode[mode] = rows;
 
-    const jbody = document.getElementById('journalBody');
-    jbody.innerHTML = journalData.map((row, idx) => `
+    const tbody = document.getElementById('journalBody-' + mode);
+    tbody.innerHTML = rows.map((row, idx) => `
       <tr class="clickable" data-idx="${idx}">
         <td>${fmtTime(row.created_at)}</td>
-        <td>${row.action}</td>
+        <td>${row.symbol}</td>
+        <td><span class="action-text ${row.action}">${row.action}</span></td>
         <td>${row.confidence}</td>
         <td>${row.entry_price}</td>
         <td class="tp-text">${fmtNum(row.take_profit)}</td>
         <td class="sl-text">${fmtNum(row.stop_loss)}</td>
+        <td class="${pnlClass(row.pnl_pct)}">${fmtPct(row.pnl_pct)}</td>
+        <td class="${pnlClass(row.dollar_pnl)}">${fmtUsd(row.dollar_pnl)}</td>
         <td><span class="badge ${row.status}">${row.status}</span></td>
       </tr>
-    `).join('');
-    attachRowToggle(jbody, journalData, 'journal', 7);
+    `).join('') || '<tr><td colspan="10" class="subtitle">No signals yet</td></tr>';
+    attachRowToggle(mode, tbody, rows, 10);
   } catch (e) { console.error(e); }
 
+  await refreshLiveReading(mode);
+}
+
+async function refreshAll() {
+  for (const mode of MODES) {
+    await refreshModePanel(mode);
+  }
   try {
     const logRes = await fetch('/api/logs');
     const logs = await logRes.json();
@@ -348,10 +369,11 @@ async function refresh() {
   } catch (e) { console.error(e); }
 }
 
-symbolSelect.addEventListener('change', refresh);
-modeSelect.addEventListener('change', refresh);
-loadSymbols();
-setInterval(refresh, 15000);
+buildTabs();
+buildPanels();
+showActivePanel();
+refreshAll();
+setInterval(refreshAll, 15000);
 </script>
 
 </body>

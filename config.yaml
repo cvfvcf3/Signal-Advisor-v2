@@ -26,9 +26,25 @@ btc_macro_filter:
     sell_multiplier: 1.15
 
 # Adaptive target: actual target used = max(success_move_pct, atr_multiplier * ATR14%)
-# so a fixed target isn't unrealistically tight/loose vs current volatility.
 adaptive_target:
   atr_multiplier: 1.4
+
+# Paper trading: purely simulated, never touches any real exchange balance.
+# Each MODE gets its own independent starting balance (three separate paper
+# accounts) so scalp/day/swing performance can be compared side by side.
+# Position sizing uses fixed fractional risk: dollar_risk = balance *
+# risk_pct_per_trade / 100; position_size_usd = dollar_risk / stop_distance_pct.
+# This means a trade with a tighter stop gets a larger notional size and vice
+# versa, so every trade risks the same dollar amount regardless of its % stop
+# distance — standard risk-based position sizing.
+# SIMPLIFICATION: balance updates happen when a trade RESOLVES, not when it
+# opens — this does not lock/reserve margin for concurrently open trades, so
+# it is a realized-P&L ledger per mode, not a full concurrent-margin
+# simulation.
+paper_trading:
+  enabled: true
+  starting_balance: 1000
+  risk_pct_per_trade: 1.0
 
 modes:
   scalp:
@@ -40,6 +56,11 @@ modes:
     success_move_pct: 0.002
     rr: 1.5
     cooldown_minutes: 20
+    max_concurrent_positions: 3
+    trailing:
+      enabled: true
+      activation_pct: 0.5
+      trail_distance_pct: 0.3
     weights:
       technical: 20
       multi_timeframe: 15
@@ -57,6 +78,11 @@ modes:
     success_move_pct: 0.01
     rr: 1.67
     cooldown_minutes: 90
+    max_concurrent_positions: 3
+    trailing:
+      enabled: true
+      activation_pct: 0.5
+      trail_distance_pct: 0.3
     weights:
       technical: 35
       multi_timeframe: 25
@@ -73,6 +99,11 @@ modes:
     success_move_pct: 0.03
     rr: 1.67
     cooldown_minutes: 360
+    max_concurrent_positions: 2
+    trailing:
+      enabled: true
+      activation_pct: 0.5
+      trail_distance_pct: 0.3
     weights:
       technical: 25
       multi_timeframe: 35

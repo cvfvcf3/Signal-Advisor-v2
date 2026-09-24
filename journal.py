@@ -1,32 +1,32 @@
 """
 Signal journal: persists every generated signal (per symbol + per mode)
-to SQLite and tracks its eventual resolution (correct/incorrect/expired).
+to SQLite and tracks its eventual resolution (CORRECT / INCORRECT /
+EXPIRED / INVALIDATED), plus a per-mode paper-trading balance ledger.
 
-PERSISTENCE: Railway (and most container hosts) wipe local container
-filesystem on every redeploy — a plain relative path here would silently
-lose all history each time new code is pushed. DB_PATH is therefore read
-from the DATA_DIR environment variable when set (point it at a Railway
-Volume's mount path, e.g. /data) and only falls back to a local ./data
-folder for local/dev runs where that isn't set up.
+PERSISTENCE: DB_PATH is read from the DATA_DIR environment variable
+(point it at a Railway Volume's mount path, e.g. /data) so history
+survives redeploys; falls back to a local ./data folder otherwise.
 
-CONCURRENCY: the Flask dashboard (request-driven) and the advisor_engine
-tick loop (background thread) both touch this database. To avoid
-"database is locked" errors under load:
-  - WAL mode is enabled (PRAGMA journal_mode=WAL) so readers don't block
-    writers and vice versa.
-  - A module-level threading.Lock wraps every write, since SQLite still
-    serializes writers even in WAL mode.
-  - A busy_timeout is set on every connection so a momentary lock waits
-    briefly instead of failing immediately.
+CONCURRENCY: WAL mode + a module-level write lock + a busy_timeout —
+see comments below for why each is needed.
 
-Every signal record carries both symbol and mode, since accuracy and
-history must be tracked per (symbol, mode) combination — never mixed.
+STATUSES:
+  PENDING     — still open, not yet resolved
+  CORRECT     — hit its target (fixed TP, or a trailing-stop exit)
+  INCORRECT   — hit its hard stop-loss
+  EXPIRED     — evaluation window ran out with neither triggered
+  INVALIDATED — closed early because the live signal reversed against
+                the open position (see advisor_engine.py) — a risk-
+                management exit, not a price-target outcome. Excluded
+                from accuracy_pct like EXPIRED, but included in P&L.
 
-Each signal also stores take_profit, stop_loss, and (once resolved)
-pnl_pct — the real signed % price move from entry to exit, computed the
-same way regardless of whether the outcome was CORRECT, INCORRECT, or
-EXPIRED, so "how much would this actually have made/lost" is answerable
-even for signals that just timed out.
+PAPER TRADING: purely simulated — never touches a real exchange
+balance. Each MODE has its own independent starting balance (see
+paper_balances table). Position size for a resolving trade is computed
+by advisor_engine.py using fixed fractional risk (dollar_risk = balance
+* risk_pct_per_trade / 100; position_size_usd = dollar_risk /
+stop_distance_pct) and passed in as dollar_pnl/position_size_usd — this
+module just persists those numbers and updates the running balance.
 """
 
 import os
@@ -82,10 +82,21 @@ def init_db():
                     notified INTEGER NOT NULL DEFAULT 0
                 )
             """)
-            # Migrations for DBs created before these columns existed.
             _add_column_if_missing(conn, "signals", "take_profit", "REAL")
             _add_column_if_missing(conn, "signals", "stop_loss", "REAL")
             _add_column_if_missing(conn, "signals", "pnl_pct", "REAL")
+            _add_column_if_missing(conn, "signals", "dollar_pnl", "REAL")
+            _add_column_if_missing(conn, "signals", "position_size_usd", "REAL")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS paper_balances (
+                    mode TEXT PRIMARY KEY,
+                    balance REAL NOT NULL,
+                    starting_balance REAL NOT NULL,
+                    trade_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT
+                )
+            """)
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_mode ON signals(symbol, mode)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_status ON signals(status)")
@@ -97,12 +108,6 @@ def init_db():
 def record_signal(symbol, mode, action, confidence, entry_price,
                    evaluate_after_candles, success_move_pct,
                    take_profit, stop_loss, layers_snapshot=None):
-    """
-    Inserts a new PENDING signal. Returns the generated signal_id.
-    take_profit / stop_loss: absolute price levels (not percentages),
-                              computed by the caller.
-    layers_snapshot: dict of which layers/values supported this signal.
-    """
     signal_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
 
@@ -127,17 +132,20 @@ def record_signal(symbol, mode, action, confidence, entry_price,
     return signal_id
 
 
-def resolve_signal(signal_id, status, exit_price, mae_pct=None, mfe_pct=None, pnl_pct=None):
-    """status: 'CORRECT' | 'INCORRECT' | 'EXPIRED'"""
+def resolve_signal(signal_id, status, exit_price, mae_pct=None, mfe_pct=None,
+                    pnl_pct=None, dollar_pnl=None, position_size_usd=None):
+    """status: 'CORRECT' | 'INCORRECT' | 'EXPIRED' | 'INVALIDATED'"""
     resolved_at = datetime.now(timezone.utc).isoformat()
     with _write_lock:
         conn = _connect()
         try:
             conn.execute("""
                 UPDATE signals
-                SET status = ?, resolved_at = ?, exit_price = ?, mae_pct = ?, mfe_pct = ?, pnl_pct = ?
+                SET status = ?, resolved_at = ?, exit_price = ?, mae_pct = ?, mfe_pct = ?,
+                    pnl_pct = ?, dollar_pnl = ?, position_size_usd = ?
                 WHERE signal_id = ?
-            """, (status, resolved_at, exit_price, mae_pct, mfe_pct, pnl_pct, signal_id))
+            """, (status, resolved_at, exit_price, mae_pct, mfe_pct,
+                  pnl_pct, dollar_pnl, position_size_usd, signal_id))
             conn.commit()
         finally:
             conn.close()
@@ -170,9 +178,21 @@ def get_pending_signals(symbol=None, mode=None):
         conn.close()
 
 
+def get_open_positions_count(mode):
+    """How many PENDING signals currently exist for this mode, across all
+    symbols — used to enforce max_concurrent_positions."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM signals WHERE mode = ? AND status = 'PENDING'",
+            (mode,),
+        ).fetchone()
+        return row["cnt"] if row else 0
+    finally:
+        conn.close()
+
+
 def get_last_signal(symbol, mode):
-    """Most recent signal (any status) for duplicate-notification checks
-    and cooldown timing."""
     conn = _connect()
     try:
         row = conn.execute("""
@@ -205,17 +225,11 @@ def get_signal_history(symbol=None, mode=None, limit=50):
 
 def get_accuracy(symbol=None, mode=None):
     """
-    Returns per (symbol, mode) accuracy stats PLUS realized P&L
-    aggregates. If symbol/mode are None, aggregates across all — but
-    callers should almost always pass both, since mixing modes/symbols
-    produces a misleading accuracy figure.
-
-    accuracy_pct is a hit-rate (CORRECT / (CORRECT+INCORRECT)), EXPIRED
-    excluded. total_pnl_pct / avg_pnl_pct are computed across ALL
-    resolved signals with a stored pnl_pct (CORRECT, INCORRECT, AND
-    EXPIRED) — since even an EXPIRED "non-hit" still has a real exit
-    price and therefore a real (small) profit or loss if a position had
-    actually been taken.
+    accuracy_pct = CORRECT / (CORRECT + INCORRECT) — EXPIRED and
+    INVALIDATED are tracked but excluded from this hit-rate, since
+    neither represents a clean target-hit-or-stopped-out outcome.
+    total_pnl_pct / avg_pnl_pct cover ALL resolved statuses with a
+    stored pnl_pct (CORRECT, INCORRECT, EXPIRED, INVALIDATED alike).
     """
     conn = _connect()
     try:
@@ -230,7 +244,7 @@ def get_accuracy(symbol=None, mode=None):
         query += " GROUP BY status"
         rows = conn.execute(query, params).fetchall()
 
-        counts = {"PENDING": 0, "CORRECT": 0, "INCORRECT": 0, "EXPIRED": 0}
+        counts = {"PENDING": 0, "CORRECT": 0, "INCORRECT": 0, "EXPIRED": 0, "INVALIDATED": 0}
         for r in rows:
             counts[r["status"]] = r["cnt"]
 
@@ -255,11 +269,70 @@ def get_accuracy(symbol=None, mode=None):
             "correct": counts["CORRECT"],
             "incorrect": counts["INCORRECT"],
             "expired": counts["EXPIRED"],
+            "invalidated": counts["INVALIDATED"],
             "pending": counts["PENDING"],
             "accuracy_pct": accuracy_pct,
             "total_pnl_pct": total_pnl_pct,
             "avg_pnl_pct": avg_pnl_pct,
             "pnl_trade_count": pnl_row["n"],
         }
+    finally:
+        conn.close()
+
+
+# ---------- paper trading balance ledger (per mode) ----------
+
+def get_paper_balance(mode, starting_balance):
+    """Returns the current balance for a mode, creating its row (seeded
+    at starting_balance) on first use."""
+    with _write_lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM paper_balances WHERE mode = ?", (mode,)).fetchone()
+            if row is None:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute("""
+                    INSERT INTO paper_balances (mode, balance, starting_balance, trade_count, updated_at)
+                    VALUES (?, ?, ?, 0, ?)
+                """, (mode, starting_balance, starting_balance, now))
+                conn.commit()
+                return starting_balance
+            return row["balance"]
+        finally:
+            conn.close()
+
+
+def apply_paper_pnl(mode, dollar_pnl, starting_balance):
+    """Adds dollar_pnl to the mode's running balance (creating the row
+    seeded at starting_balance first if needed), incrementing trade_count.
+    Returns the new balance."""
+    with _write_lock:
+        conn = _connect()
+        try:
+            row = conn.execute("SELECT * FROM paper_balances WHERE mode = ?", (mode,)).fetchone()
+            now = datetime.now(timezone.utc).isoformat()
+            if row is None:
+                new_balance = starting_balance + dollar_pnl
+                conn.execute("""
+                    INSERT INTO paper_balances (mode, balance, starting_balance, trade_count, updated_at)
+                    VALUES (?, ?, ?, 1, ?)
+                """, (mode, new_balance, starting_balance, now))
+            else:
+                new_balance = row["balance"] + dollar_pnl
+                conn.execute("""
+                    UPDATE paper_balances SET balance = ?, trade_count = trade_count + 1, updated_at = ?
+                    WHERE mode = ?
+                """, (new_balance, now, mode))
+            conn.commit()
+            return new_balance
+        finally:
+            conn.close()
+
+
+def get_all_paper_balances():
+    conn = _connect()
+    try:
+        rows = conn.execute("SELECT * FROM paper_balances").fetchall()
+        return {r["mode"]: dict(r) for r in rows}
     finally:
         conn.close()
