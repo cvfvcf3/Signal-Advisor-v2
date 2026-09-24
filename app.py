@@ -1,7 +1,8 @@
 """
-Flask dashboard + JSON API. READ-ONLY: every route here only reads data
-(advisor's in-memory readings, or the journal, or the simulated paper
-balances). Nothing here can place, modify, or cancel a real exchange
+Flask dashboard + JSON API. READ-ONLY except one clearly-marked,
+token-gated destructive route (clear-history) that the user explicitly
+asked for, used to reset the journal when starting a fresh evaluation
+period. Nothing here can place, modify, or cancel a real exchange
 order — there is no such endpoint. Paper trading balances are purely
 simulated numbers this app tracks itself; they never touch a real
 account.
@@ -61,6 +62,19 @@ def _validate_reload_payload(payload, config):
             return False, f"telegram: fields not allowed: {sorted(unknown_fields)}"
 
     return True, None
+
+
+def _check_admin_token():
+    """Accepts either an Authorization: Bearer header (for programmatic
+    use) or a ?token= query param (for triggering from a mobile browser
+    address bar, where setting custom headers isn't practical). Constant-
+    time comparison either way."""
+    token_env = "DASHBOARD_ADMIN_TOKEN"
+    expected = os.environ.get(token_env, "")
+    header_token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    query_token = request.args.get("token", "").strip()
+    provided = header_token or query_token
+    return bool(expected) and hmac.compare_digest(provided, expected)
 
 
 CSV_COLUMNS = [
@@ -136,11 +150,6 @@ def create_app(advisor, config):
 
     @app.route("/api/paper_balance")
     def api_paper_balance():
-        """
-        Simulated paper-trading balance(s). ?mode=scalp for one mode, or
-        omit for all three. Purely a simulated number this app tracks
-        itself — never a real exchange balance.
-        """
         mode = request.args.get("mode")
         starting_balance = config.get("paper_trading", {}).get("starting_balance", 1000)
 
@@ -229,13 +238,31 @@ def create_app(advisor, config):
             headers={"Content-Disposition": "attachment; filename=signal_history.csv"},
         )
 
+    @app.route("/api/admin/clear-history", methods=["GET", "POST"])
+    def admin_clear_history():
+        """
+        DESTRUCTIVE: wipes every signal record and every paper-trading
+        balance (all modes reset to their starting_balance). Requires the
+        admin token (query param ?token=... or Authorization header) AND
+        ?confirm=yes, so it can't be triggered by an accidental click or
+        link preview.
+        """
+        if not _check_admin_token():
+            return jsonify({"error": "unauthorized"}), 401
+
+        if request.args.get("confirm") != "yes":
+            return jsonify({
+                "error": "confirmation required",
+                "hint": "add &confirm=yes to actually clear history",
+            }), 400
+
+        journal.clear_all_history()
+        log_activity("history cleared via admin endpoint")
+        return jsonify({"status": "ok", "message": "all signal history and paper balances cleared"})
+
     @app.route("/api/admin/reload-config", methods=["POST"])
     def admin_reload_config():
-        token_env = config["dashboard"]["admin_token_env"]
-        expected = os.environ.get(token_env, "")
-        provided = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
-
-        if not expected or not hmac.compare_digest(provided, expected):
+        if not _check_admin_token():
             return jsonify({"error": "unauthorized"}), 401
 
         payload = request.get_json(silent=True) or {}

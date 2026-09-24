@@ -7,8 +7,7 @@ PERSISTENCE: DB_PATH is read from the DATA_DIR environment variable
 (point it at a Railway Volume's mount path, e.g. /data) so history
 survives redeploys; falls back to a local ./data folder otherwise.
 
-CONCURRENCY: WAL mode + a module-level write lock + a busy_timeout —
-see comments below for why each is needed.
+CONCURRENCY: WAL mode + a module-level write lock + a busy_timeout.
 
 STATUSES:
   PENDING     — still open, not yet resolved
@@ -16,17 +15,10 @@ STATUSES:
   INCORRECT   — hit its hard stop-loss
   EXPIRED     — evaluation window ran out with neither triggered
   INVALIDATED — closed early because the live signal reversed against
-                the open position (see advisor_engine.py) — a risk-
-                management exit, not a price-target outcome. Excluded
-                from accuracy_pct like EXPIRED, but included in P&L.
+                the open position
 
 PAPER TRADING: purely simulated — never touches a real exchange
-balance. Each MODE has its own independent starting balance (see
-paper_balances table). Position size for a resolving trade is computed
-by advisor_engine.py using fixed fractional risk (dollar_risk = balance
-* risk_pct_per_trade / 100; position_size_usd = dollar_risk /
-stop_distance_pct) and passed in as dollar_pnl/position_size_usd — this
-module just persists those numbers and updates the running balance.
+balance. Each MODE has its own independent starting balance.
 """
 
 import os
@@ -134,7 +126,6 @@ def record_signal(symbol, mode, action, confidence, entry_price,
 
 def resolve_signal(signal_id, status, exit_price, mae_pct=None, mfe_pct=None,
                     pnl_pct=None, dollar_pnl=None, position_size_usd=None):
-    """status: 'CORRECT' | 'INCORRECT' | 'EXPIRED' | 'INVALIDATED'"""
     resolved_at = datetime.now(timezone.utc).isoformat()
     with _write_lock:
         conn = _connect()
@@ -179,8 +170,6 @@ def get_pending_signals(symbol=None, mode=None):
 
 
 def get_open_positions_count(mode):
-    """How many PENDING signals currently exist for this mode, across all
-    symbols — used to enforce max_concurrent_positions."""
     conn = _connect()
     try:
         row = conn.execute(
@@ -224,13 +213,6 @@ def get_signal_history(symbol=None, mode=None, limit=50):
 
 
 def get_accuracy(symbol=None, mode=None):
-    """
-    accuracy_pct = CORRECT / (CORRECT + INCORRECT) — EXPIRED and
-    INVALIDATED are tracked but excluded from this hit-rate, since
-    neither represents a clean target-hit-or-stopped-out outcome.
-    total_pnl_pct / avg_pnl_pct cover ALL resolved statuses with a
-    stored pnl_pct (CORRECT, INCORRECT, EXPIRED, INVALIDATED alike).
-    """
     conn = _connect()
     try:
         query = "SELECT status, COUNT(*) as cnt FROM signals WHERE 1=1"
@@ -280,11 +262,7 @@ def get_accuracy(symbol=None, mode=None):
         conn.close()
 
 
-# ---------- paper trading balance ledger (per mode) ----------
-
 def get_paper_balance(mode, starting_balance):
-    """Returns the current balance for a mode, creating its row (seeded
-    at starting_balance) on first use."""
     with _write_lock:
         conn = _connect()
         try:
@@ -303,9 +281,6 @@ def get_paper_balance(mode, starting_balance):
 
 
 def apply_paper_pnl(mode, dollar_pnl, starting_balance):
-    """Adds dollar_pnl to the mode's running balance (creating the row
-    seeded at starting_balance first if needed), incrementing trade_count.
-    Returns the new balance."""
     with _write_lock:
         conn = _connect()
         try:
@@ -336,3 +311,21 @@ def get_all_paper_balances():
         return {r["mode"]: dict(r) for r in rows}
     finally:
         conn.close()
+
+
+def clear_all_history():
+    """
+    Wipes every signal record and every paper-trading balance — used only
+    by the token-gated /api/admin/clear-history route. Does not drop the
+    tables (structure stays, migrations don't need to re-run), just
+    empties them, and reclaims disk space afterward.
+    """
+    with _write_lock:
+        conn = _connect()
+        try:
+            conn.execute("DELETE FROM signals")
+            conn.execute("DELETE FROM paper_balances")
+            conn.commit()
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
