@@ -1,7 +1,7 @@
 """
 Signal journal: persists every generated signal (per symbol + per mode)
-to SQLite and tracks its eventual resolution (CORRECT / INCORRECT /
-EXPIRED / INVALIDATED), plus a per-mode paper-trading balance ledger.
+to SQLite and tracks its eventual resolution, plus a per-mode
+paper-trading balance ledger.
 
 PERSISTENCE: DB_PATH is read from the DATA_DIR environment variable
 (point it at a Railway Volume's mount path, e.g. /data) so history
@@ -11,14 +11,24 @@ CONCURRENCY: WAL mode + a module-level write lock + a busy_timeout.
 
 STATUSES:
   PENDING     — still open, not yet resolved
-  CORRECT     — hit its target (fixed TP, or a trailing-stop exit)
-  INCORRECT   — hit its hard stop-loss
-  EXPIRED     — evaluation window ran out with neither triggered
+  CORRECT     — closed at/above breakeven (hit TP/trailing-exit, or
+                window ran out with a non-negative final P&L)
+  INCORRECT   — hit its hard stop-loss, or window ran out negative
   INVALIDATED — closed early because the live signal reversed against
-                the open position
+                the open position — a risk-management exit, kept
+                distinct from CORRECT/INCORRECT since it isn't a
+                price-target outcome. Excluded from accuracy_pct, but
+                included in P&L aggregates.
 
 PAPER TRADING: purely simulated — never touches a real exchange
 balance. Each MODE has its own independent starting balance.
+
+ATTRIBUTION: get_layer_attribution() answers "when layer X agreed with
+the trade's direction, how often was the trade actually correct? and
+when it disagreed?" — per layer, per mode. A layer whose "agree"
+accuracy is no better (or worse) than its "disagree" accuracy is
+contributing noise rather than signal, which is exactly the kind of
+thing to catch before trusting its configured weight.
 """
 
 import os
@@ -27,6 +37,7 @@ import threading
 import uuid
 import json
 from datetime import datetime, timezone
+from collections import defaultdict
 
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 DB_PATH = os.path.join(DATA_DIR, "signals.db")
@@ -126,6 +137,7 @@ def record_signal(symbol, mode, action, confidence, entry_price,
 
 def resolve_signal(signal_id, status, exit_price, mae_pct=None, mfe_pct=None,
                     pnl_pct=None, dollar_pnl=None, position_size_usd=None):
+    """status: 'CORRECT' | 'INCORRECT' | 'INVALIDATED'"""
     resolved_at = datetime.now(timezone.utc).isoformat()
     with _write_lock:
         conn = _connect()
@@ -226,7 +238,7 @@ def get_accuracy(symbol=None, mode=None):
         query += " GROUP BY status"
         rows = conn.execute(query, params).fetchall()
 
-        counts = {"PENDING": 0, "CORRECT": 0, "INCORRECT": 0, "EXPIRED": 0, "INVALIDATED": 0}
+        counts = {"PENDING": 0, "CORRECT": 0, "INCORRECT": 0, "INVALIDATED": 0}
         for r in rows:
             counts[r["status"]] = r["cnt"]
 
@@ -250,7 +262,6 @@ def get_accuracy(symbol=None, mode=None):
             "mode": mode,
             "correct": counts["CORRECT"],
             "incorrect": counts["INCORRECT"],
-            "expired": counts["EXPIRED"],
             "invalidated": counts["INVALIDATED"],
             "pending": counts["PENDING"],
             "accuracy_pct": accuracy_pct,
@@ -260,6 +271,68 @@ def get_accuracy(symbol=None, mode=None):
         }
     finally:
         conn.close()
+
+
+def get_layer_attribution(mode=None):
+    """
+    For each layer, splits resolved (CORRECT/INCORRECT) trades into
+    "agreed with the trade's direction" vs "disagreed", and reports the
+    accuracy within each group. A layer that's contributing real signal
+    should show agree_accuracy meaningfully higher than disagree_accuracy;
+    one that doesn't (or is inverted) is a candidate for a lower weight.
+    """
+    conn = _connect()
+    try:
+        query = "SELECT action, status, layers_snapshot FROM signals WHERE status IN ('CORRECT','INCORRECT')"
+        params = []
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    stats = defaultdict(lambda: {"agree_correct": 0, "agree_total": 0,
+                                  "disagree_correct": 0, "disagree_total": 0})
+
+    for r in rows:
+        raw = r["layers_snapshot"]
+        if not raw:
+            continue
+        try:
+            layers = json.loads(raw)
+        except Exception:
+            continue
+
+        action = r["action"]
+        was_correct = r["status"] == "CORRECT"
+
+        for layer_name, reading in layers.items():
+            if not isinstance(reading, dict):
+                continue
+            bull = reading.get("bullish_score", 0) or 0
+            bear = reading.get("bearish_score", 0) or 0
+            if bull == bear:
+                continue  # neutral reading, doesn't "agree" or "disagree"
+
+            layer_dir = "BUY" if bull > bear else "SELL"
+            agree = (layer_dir == action)
+            key_prefix = "agree" if agree else "disagree"
+            stats[layer_name][f"{key_prefix}_total"] += 1
+            if was_correct:
+                stats[layer_name][f"{key_prefix}_correct"] += 1
+
+    result = {}
+    for name, s in stats.items():
+        agree_acc = round((s["agree_correct"] / s["agree_total"]) * 100, 1) if s["agree_total"] else None
+        disagree_acc = round((s["disagree_correct"] / s["disagree_total"]) * 100, 1) if s["disagree_total"] else None
+        result[name] = {
+            "agree_count": s["agree_total"],
+            "agree_accuracy_pct": agree_acc,
+            "disagree_count": s["disagree_total"],
+            "disagree_accuracy_pct": disagree_acc,
+        }
+    return result
 
 
 def get_paper_balance(mode, starting_balance):
@@ -314,12 +387,7 @@ def get_all_paper_balances():
 
 
 def clear_all_history():
-    """
-    Wipes every signal record and every paper-trading balance — used only
-    by the token-gated /api/admin/clear-history route. Does not drop the
-    tables (structure stays, migrations don't need to re-run), just
-    empties them, and reclaims disk space afterward.
-    """
+    """Wipes every signal record and every paper-trading balance."""
     with _write_lock:
         conn = _connect()
         try:

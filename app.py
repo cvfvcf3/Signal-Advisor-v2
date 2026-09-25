@@ -1,11 +1,8 @@
 """
 Flask dashboard + JSON API. READ-ONLY except one clearly-marked,
-token-gated destructive route (clear-history) that the user explicitly
-asked for, used to reset the journal when starting a fresh evaluation
-period. Nothing here can place, modify, or cancel a real exchange
-order — there is no such endpoint. Paper trading balances are purely
-simulated numbers this app tracks itself; they never touch a real
-account.
+token-gated destructive route (clear-history). Nothing here can place,
+modify, or cancel a real exchange order. Paper trading balances are
+purely simulated numbers this app tracks itself.
 """
 
 import os
@@ -65,12 +62,7 @@ def _validate_reload_payload(payload, config):
 
 
 def _check_admin_token():
-    """Accepts either an Authorization: Bearer header (for programmatic
-    use) or a ?token= query param (for triggering from a mobile browser
-    address bar, where setting custom headers isn't practical). Constant-
-    time comparison either way."""
-    token_env = "DASHBOARD_ADMIN_TOKEN"
-    expected = os.environ.get(token_env, "")
+    expected = os.environ.get("DASHBOARD_ADMIN_TOKEN", "")
     header_token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
     query_token = request.args.get("token", "").strip()
     provided = header_token or query_token
@@ -105,13 +97,11 @@ def create_app(advisor, config):
                 last_tick_time = entry["time"]
                 last_tick_ok = "tick completed" in entry["message"]
                 break
-
         db_reachable = True
         try:
             journal.get_accuracy()
         except Exception:
             db_reachable = False
-
         return jsonify({
             "status": "ok" if db_reachable else "degraded",
             "db_reachable": db_reachable,
@@ -127,11 +117,9 @@ def create_app(advisor, config):
     def api_current_signal():
         symbol = request.args.get("symbol")
         mode = request.args.get("mode")
-
         if symbol and mode:
             reading = advisor.get_reading(symbol, mode)
             return jsonify(reading or {})
-
         readings = advisor.get_all_readings()
         return jsonify(list(readings.values()))
 
@@ -147,6 +135,16 @@ def create_app(advisor, config):
         symbol = request.args.get("symbol")
         mode = request.args.get("mode")
         return jsonify(journal.get_accuracy(symbol=symbol, mode=mode))
+
+    @app.route("/api/attribution")
+    def api_attribution():
+        """
+        Level-1 attribution: per layer, accuracy when that layer agreed
+        with the trade's direction vs when it disagreed. Read-only,
+        computed from resolved CORRECT/INCORRECT signals only.
+        """
+        mode = request.args.get("mode")
+        return jsonify(journal.get_layer_attribution(mode=mode))
 
     @app.route("/api/paper_balance")
     def api_paper_balance():
@@ -240,22 +238,13 @@ def create_app(advisor, config):
 
     @app.route("/api/admin/clear-history", methods=["GET", "POST"])
     def admin_clear_history():
-        """
-        DESTRUCTIVE: wipes every signal record and every paper-trading
-        balance (all modes reset to their starting_balance). Requires the
-        admin token (query param ?token=... or Authorization header) AND
-        ?confirm=yes, so it can't be triggered by an accidental click or
-        link preview.
-        """
         if not _check_admin_token():
             return jsonify({"error": "unauthorized"}), 401
-
         if request.args.get("confirm") != "yes":
             return jsonify({
                 "error": "confirmation required",
                 "hint": "add &confirm=yes to actually clear history",
             }), 400
-
         journal.clear_all_history()
         log_activity("history cleared via admin endpoint")
         return jsonify({"status": "ok", "message": "all signal history and paper balances cleared"})
@@ -273,7 +262,6 @@ def create_app(advisor, config):
         if "modes" in payload:
             for mode_name, updates in payload["modes"].items():
                 config["modes"][mode_name].update(updates)
-
         if "telegram" in payload:
             config["telegram"].update(payload["telegram"])
 

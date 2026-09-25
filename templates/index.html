@@ -70,7 +70,6 @@
   .badge.CORRECT { background: rgba(22,199,132,0.15); color: var(--bull); }
   .badge.INCORRECT { background: rgba(234,57,67,0.15); color: var(--bear); }
   .badge.PENDING { background: rgba(240,185,11,0.15); color: var(--accent); }
-  .badge.EXPIRED { background: rgba(139,149,161,0.15); color: var(--muted); }
   .badge.INVALIDATED { background: rgba(88,166,255,0.15); color: var(--info); }
   .action-text { font-weight: 600; }
   .action-text.BUY { color: var(--bull); }
@@ -83,6 +82,9 @@
   .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 11px; }
   .detail-grid .lbl { color: var(--muted); }
   .detail-close { float: right; color: var(--muted); font-size: 11px; }
+  .attr-good { color: var(--bull); }
+  .attr-bad { color: var(--bear); }
+  .attr-note { font-size: 11px; color: var(--muted); margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -91,7 +93,6 @@
 <div class="subtitle">READ-ONLY · NO TRADING · Paper balances are simulated only</div>
 
 <div class="tabs" id="modeTabs"></div>
-
 <div id="panelsContainer"></div>
 
 <div class="card">
@@ -104,26 +105,14 @@ const MODES = {{ modes | tojson }};
 const SYMBOLS = {{ symbols | tojson }};
 
 let activeMode = MODES[0];
-let openDetailKey = {};   // per-mode currently open detail row key
-let journalDataByMode = {}; // per-mode last-fetched signal rows (for detail expand)
+let openDetailKey = {};
+let journalDataByMode = {};
 
-function fmtTime(iso) {
-  if (!iso) return '--';
-  return new Date(iso).toLocaleTimeString();
-}
+function fmtTime(iso) { if (!iso) return '--'; return new Date(iso).toLocaleTimeString(); }
 function fmtNum(n) { return n != null ? n : '--'; }
-function fmtPct(n) {
-  if (n == null) return '--';
-  return (n > 0 ? '+' : '') + n + '%';
-}
-function fmtUsd(n) {
-  if (n == null) return '--';
-  return (n > 0 ? '+$' : (n < 0 ? '-$' : '$')) + Math.abs(n).toFixed(2);
-}
-function pnlClass(n) {
-  if (n == null) return '';
-  return n > 0 ? 'positive' : (n < 0 ? 'negative' : '');
-}
+function fmtPct(n) { if (n == null) return '--'; return (n > 0 ? '+' : '') + n + '%'; }
+function fmtUsd(n) { if (n == null) return '--'; return (n > 0 ? '+$' : (n < 0 ? '-$' : '$')) + Math.abs(n).toFixed(2); }
+function pnlClass(n) { if (n == null) return ''; return n > 0 ? 'positive' : (n < 0 ? 'negative' : ''); }
 
 function buildTabs() {
   const tabsDiv = document.getElementById('modeTabs');
@@ -175,11 +164,20 @@ function buildPanels() {
         <div class="stat-grid">
           <div class="stat"><div class="label">Correct</div><div class="value" id="statCorrect-${mode}">--</div></div>
           <div class="stat"><div class="label">Incorrect</div><div class="value" id="statIncorrect-${mode}">--</div></div>
-          <div class="stat"><div class="label">Expired</div><div class="value" id="statExpired-${mode}">--</div></div>
           <div class="stat"><div class="label">Invalidated</div><div class="value" id="statInvalidated-${mode}">--</div></div>
           <div class="stat"><div class="label">Accuracy</div><div class="value" id="statAccuracy-${mode}">--</div></div>
           <div class="stat"><div class="label">Avg P&L%</div><div class="value" id="statAvgPnl-${mode}">--</div></div>
+          <div class="stat"><div class="label">Total P&L%</div><div class="value" id="statTotalPnl-${mode}">--</div></div>
         </div>
+      </div>
+
+      <div class="card">
+        <strong>Layer Attribution — ${mode}</strong>
+        <div class="attr-note">When a layer agreed with the trade's direction vs when it disagreed — a layer should be more accurate when it agrees.</div>
+        <table>
+          <thead><tr><th>Layer</th><th>Agreed (n)</th><th>Acc%</th><th>Disagreed (n)</th><th>Acc%</th></tr></thead>
+          <tbody id="attrBody-${mode}"></tbody>
+        </table>
       </div>
 
       <div class="card">
@@ -232,7 +230,7 @@ function detailRowHtml(row, colspan) {
       `<div class="layer-bar"><span>${name}</span><span>bull ${r.bullish_score ?? '--'} / bear ${r.bearish_score ?? '--'}</span></div>`
     ).join('');
   }
-  const resolved = ['CORRECT','INCORRECT','EXPIRED','INVALIDATED'].includes(row.status);
+  const resolved = ['CORRECT','INCORRECT','INVALIDATED'].includes(row.status);
   const extra = resolved ? `
     <div class="detail-grid" style="margin-top:8px;">
       <div class="lbl">Exit price</div><div>${fmtNum(row.exit_price)}</div>
@@ -256,15 +254,9 @@ function attachRowToggle(mode, tbody, dataArr, colspan) {
     tr.addEventListener('click', () => {
       const idx = parseInt(tr.getAttribute('data-idx'), 10);
       const key = mode + '-' + idx;
-
       const openRow = tbody.querySelector('tr.detail-row');
       if (openRow) openRow.remove();
-
-      if (openDetailKey[mode] === key) {
-        openDetailKey[mode] = null;
-        return;
-      }
-
+      if (openDetailKey[mode] === key) { openDetailKey[mode] = null; return; }
       const row = dataArr[idx];
       const detailTr = document.createElement('tr');
       detailTr.className = 'detail-row';
@@ -309,12 +301,32 @@ async function refreshModePanel(mode) {
     const acc = await accRes.json();
     document.getElementById('statCorrect-' + mode).textContent = acc.correct ?? '--';
     document.getElementById('statIncorrect-' + mode).textContent = acc.incorrect ?? '--';
-    document.getElementById('statExpired-' + mode).textContent = acc.expired ?? '--';
     document.getElementById('statInvalidated-' + mode).textContent = acc.invalidated ?? '--';
     document.getElementById('statAccuracy-' + mode).textContent = acc.accuracy_pct != null ? acc.accuracy_pct + '%' : '--';
     const avgEl = document.getElementById('statAvgPnl-' + mode);
     avgEl.textContent = fmtPct(acc.avg_pnl_pct);
     avgEl.className = 'value ' + pnlClass(acc.avg_pnl_pct);
+    const totEl = document.getElementById('statTotalPnl-' + mode);
+    totEl.textContent = fmtPct(acc.total_pnl_pct);
+    totEl.className = 'value ' + pnlClass(acc.total_pnl_pct);
+  } catch (e) { console.error(e); }
+
+  try {
+    const attrRes = await fetch(`/api/attribution?mode=${mode}`);
+    const attr = await attrRes.json();
+    const tbody = document.getElementById('attrBody-' + mode);
+    const entries = Object.entries(attr);
+    tbody.innerHTML = entries.map(([name, s]) => {
+      const agreeCls = (s.agree_accuracy_pct != null && s.disagree_accuracy_pct != null)
+        ? (s.agree_accuracy_pct >= s.disagree_accuracy_pct ? 'attr-good' : 'attr-bad') : '';
+      return `<tr>
+        <td>${name}</td>
+        <td>${s.agree_count}</td>
+        <td class="${agreeCls}">${s.agree_accuracy_pct != null ? s.agree_accuracy_pct + '%' : '--'}</td>
+        <td>${s.disagree_count}</td>
+        <td>${s.disagree_accuracy_pct != null ? s.disagree_accuracy_pct + '%' : '--'}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="5" class="subtitle">Not enough resolved trades yet</td></tr>';
   } catch (e) { console.error(e); }
 
   try {
@@ -357,9 +369,7 @@ async function refreshModePanel(mode) {
 }
 
 async function refreshAll() {
-  for (const mode of MODES) {
-    await refreshModePanel(mode);
-  }
+  for (const mode of MODES) { await refreshModePanel(mode); }
   try {
     const logRes = await fetch('/api/logs');
     const logs = await logRes.json();
