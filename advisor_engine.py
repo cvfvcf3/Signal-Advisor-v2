@@ -7,25 +7,15 @@ at startup (by main.py) and its run_tick() is called on a timer
   2. Loops over every (symbol, mode) combination, running all 5 layers,
      combining them into a composite score, applying the BTC macro-filter
      to altcoins, and deciding BUY/SELL/WAIT.
-  3. On a new BUY/SELL: checks max_concurrent_positions for that mode
-     (skips if already at the cap), computes a volatility-adaptive
-     take_profit/stop_loss, and records the signal — guarded by
-     duplicate protection and a per-mode cooldown.
-  4. Evaluates PENDING signals two ways, in order:
-       a. Price-action outcome via evaluator.evaluate_signal (path-aware
-          TP/SL/trailing/EXPIRED check against newly-closed candles).
-       b. If still open, INVALIDATION: compares the pending signal's
-          original direction against this tick's freshly-computed live
-          reading for that same (symbol, mode). If the live composite
-          has flipped hard enough to now itself imply the opposite
-          action (gap >= mode's min_score_gap), the position is closed
-          early as INVALIDATED at the current price — this is a risk-
-          management exit for when the original thesis reverses, rather
-          than waiting for a fixed stop-loss or timeout. Guarded by a
-          minimum signal age (10 minutes) to avoid first-tick noise.
-     Either way, once resolved, computes the paper-trading dollar P&L
-     for that mode's simulated balance (see config.yaml paper_trading)
-     and persists everything together.
+  3. On a new BUY/SELL: checks max_concurrent_positions for that mode,
+     computes a volatility-adaptive take_profit/stop_loss (with a hard
+     minimum stop distance per mode — see _compute_tp_sl), and records
+     the signal — guarded by duplicate protection and a per-mode cooldown.
+  4. Evaluates PENDING signals: price-action outcome first (path-aware
+     TP/SL/trailing — see evaluator.py), then INVALIDATION if still open
+     (the live composite reading has flipped hard enough to now itself
+     imply the opposite action). Computes paper-trading dollar P&L for
+     whichever outcome applies.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
@@ -177,11 +167,27 @@ class Advisor:
             self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv)
 
     def _compute_tp_sl(self, action, entry_price, mode_cfg, primary_ohlcv):
+        """
+        Adaptive target: target_pct = max(success_move_pct, atr_multiplier * ATR%)
+        using a per-mode ATR lookback (slower modes use a longer ATR period
+        so a single unusually calm window doesn't produce an artificially
+        tight target/stop). Stop distance is target_pct / rr, then floored
+        at the mode's min_stop_pct — if the floor kicks in, the target is
+        recomputed from the floored stop (stop_pct * rr) so the configured
+        R:R ratio is preserved rather than shrinking when the floor
+        applies.
+        """
         atr_mult = self.config.get("adaptive_target", {}).get("atr_multiplier", 1.4)
-        atr_pct_value = technical.atr_pct(primary_ohlcv, period=14)
+        atr_period = mode_cfg.get("atr_period", 14)
+        atr_pct_value = technical.atr_pct(primary_ohlcv, period=atr_period)
 
         target_pct = max(mode_cfg["success_move_pct"], atr_mult * atr_pct_value)
         stop_pct = target_pct / mode_cfg["rr"]
+
+        min_stop_pct = mode_cfg.get("min_stop_pct")
+        if min_stop_pct is not None and stop_pct < min_stop_pct:
+            stop_pct = min_stop_pct
+            target_pct = stop_pct * mode_cfg["rr"]
 
         if action == "BUY":
             take_profit = entry_price * (1 + target_pct)
@@ -249,8 +255,6 @@ class Advisor:
     # ---------- invalidation (thesis-reversal early exit) ----------
 
     def _check_invalidation(self, sig):
-        """Returns an evaluator-style result dict if the signal's live
-        reading has reversed hard enough to invalidate it, else None."""
         entry_dt = datetime.fromisoformat(sig["created_at"])
         if entry_dt.tzinfo is None:
             entry_dt = entry_dt.replace(tzinfo=timezone.utc)
@@ -275,7 +279,7 @@ class Advisor:
         if not reversed_hard:
             return None
 
-        exit_price = current["entry_price"]  # latest close used for this tick's reading
+        exit_price = current["entry_price"]
         entry = sig["entry_price"]
         return {
             "status": "INVALIDATED",
