@@ -32,18 +32,20 @@ paper_trading:
   enabled: true
   starting_balance: 1000
   risk_pct_per_trade: 1.0
-  # Round-trip taker fee, as a fraction of price (0.0008 = 0.08%, a
-  # reasonable approximation for Binance USDT-M futures taker fees both
-  # ways). Deducted from every resolved trade's pnl_pct before it's used
-  # for accuracy-adjacent stats and the paper balance — gross_pnl_pct is
-  # still stored separately so the pre-fee number stays visible too.
   fee_pct_roundtrip: 0.0008
 
 modes:
   scalp:
     primary_timeframe: "5m"
     confirm_timeframes: ["15m", "1h"]
-    min_score_to_signal: 65
+    # Asymmetric threshold: real trade data showed BUY underperforming
+    # SELL at the same bar (38.7% vs 57.4% accuracy over ~190 resolved
+    # trades). Raising BUY's bar filters weaker BUY setups while still
+    # letting strong ones through, rather than pausing BUY entirely —
+    # keeps generating BUY data to see if the gap closes or persists.
+    min_score_to_signal:
+      buy: 73
+      sell: 65
     min_score_gap: 10
     evaluation_candles: 12
     success_move_pct: 0.002
