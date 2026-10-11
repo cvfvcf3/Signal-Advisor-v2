@@ -4,31 +4,22 @@ to SQLite and tracks its eventual resolution, plus a per-mode
 paper-trading balance ledger.
 
 PERSISTENCE: DB_PATH is read from the DATA_DIR environment variable
-(point it at a Railway Volume's mount path, e.g. /data) so history
-survives redeploys; falls back to a local ./data folder otherwise.
+(point it at a Railway Volume's mount path, e.g. /data).
 
 CONCURRENCY: WAL mode + a module-level write lock + a busy_timeout.
 
-STATUSES:
-  PENDING     — still open, not yet resolved
-  CORRECT     — closed at/above breakeven (hit TP/trailing-exit, or
-                window ran out with a non-negative final P&L)
-  INCORRECT   — hit its hard stop-loss, or window ran out negative
-  INVALIDATED — closed early because the live signal reversed against
-                the open position — a risk-management exit, kept
-                distinct from CORRECT/INCORRECT since it isn't a
-                price-target outcome. Excluded from accuracy_pct, but
-                included in P&L aggregates.
+STATUSES: PENDING, CORRECT, INCORRECT, INVALIDATED (see advisor_engine.py
+for what each means).
 
-PAPER TRADING: purely simulated — never touches a real exchange
-balance. Each MODE has its own independent starting balance.
+FEES: pnl_pct stored here is NET of the configured round-trip fee
+(paper_trading.fee_pct_roundtrip) — gross_pnl_pct keeps the pre-fee
+number for comparison. Both are computed by advisor_engine.py; this
+module just persists them.
 
-ATTRIBUTION: get_layer_attribution() answers "when layer X agreed with
-the trade's direction, how often was the trade actually correct? and
-when it disagreed?" — per layer, per mode. A layer whose "agree"
-accuracy is no better (or worse) than its "disagree" accuracy is
-contributing noise rather than signal, which is exactly the kind of
-thing to catch before trusting its configured weight.
+ATTRIBUTION / BREAKDOWNS: get_layer_attribution(), get_action_breakdown()
+and get_confidence_buckets() all answer "what's actually working" from
+the resolved-trade history — layer-level, BUY-vs-SELL, and by confidence
+range respectively.
 """
 
 import os
@@ -88,6 +79,7 @@ def init_db():
             _add_column_if_missing(conn, "signals", "take_profit", "REAL")
             _add_column_if_missing(conn, "signals", "stop_loss", "REAL")
             _add_column_if_missing(conn, "signals", "pnl_pct", "REAL")
+            _add_column_if_missing(conn, "signals", "gross_pnl_pct", "REAL")
             _add_column_if_missing(conn, "signals", "dollar_pnl", "REAL")
             _add_column_if_missing(conn, "signals", "position_size_usd", "REAL")
 
@@ -136,8 +128,9 @@ def record_signal(symbol, mode, action, confidence, entry_price,
 
 
 def resolve_signal(signal_id, status, exit_price, mae_pct=None, mfe_pct=None,
-                    pnl_pct=None, dollar_pnl=None, position_size_usd=None):
-    """status: 'CORRECT' | 'INCORRECT' | 'INVALIDATED'"""
+                    pnl_pct=None, gross_pnl_pct=None, dollar_pnl=None, position_size_usd=None):
+    """status: 'CORRECT' | 'INCORRECT' | 'INVALIDATED'. pnl_pct is NET of
+    fees; gross_pnl_pct is the pre-fee figure."""
     resolved_at = datetime.now(timezone.utc).isoformat()
     with _write_lock:
         conn = _connect()
@@ -145,10 +138,10 @@ def resolve_signal(signal_id, status, exit_price, mae_pct=None, mfe_pct=None,
             conn.execute("""
                 UPDATE signals
                 SET status = ?, resolved_at = ?, exit_price = ?, mae_pct = ?, mfe_pct = ?,
-                    pnl_pct = ?, dollar_pnl = ?, position_size_usd = ?
+                    pnl_pct = ?, gross_pnl_pct = ?, dollar_pnl = ?, position_size_usd = ?
                 WHERE signal_id = ?
             """, (status, resolved_at, exit_price, mae_pct, mfe_pct,
-                  pnl_pct, dollar_pnl, position_size_usd, signal_id))
+                  pnl_pct, gross_pnl_pct, dollar_pnl, position_size_usd, signal_id))
             conn.commit()
         finally:
             conn.close()
@@ -274,13 +267,6 @@ def get_accuracy(symbol=None, mode=None):
 
 
 def get_layer_attribution(mode=None):
-    """
-    For each layer, splits resolved (CORRECT/INCORRECT) trades into
-    "agreed with the trade's direction" vs "disagreed", and reports the
-    accuracy within each group. A layer that's contributing real signal
-    should show agree_accuracy meaningfully higher than disagree_accuracy;
-    one that doesn't (or is inverted) is a candidate for a lower weight.
-    """
     conn = _connect()
     try:
         query = "SELECT action, status, layers_snapshot FROM signals WHERE status IN ('CORRECT','INCORRECT')"
@@ -313,7 +299,7 @@ def get_layer_attribution(mode=None):
             bull = reading.get("bullish_score", 0) or 0
             bear = reading.get("bearish_score", 0) or 0
             if bull == bear:
-                continue  # neutral reading, doesn't "agree" or "disagree"
+                continue
 
             layer_dir = "BUY" if bull > bear else "SELL"
             agree = (layer_dir == action)
@@ -332,6 +318,86 @@ def get_layer_attribution(mode=None):
             "disagree_count": s["disagree_total"],
             "disagree_accuracy_pct": disagree_acc,
         }
+    return result
+
+
+def get_action_breakdown(mode=None):
+    """BUY vs SELL accuracy and P&L, among resolved (CORRECT/INCORRECT)
+    signals — surfaces a directional edge or bias at a glance."""
+    conn = _connect()
+    try:
+        query = "SELECT action, status, pnl_pct FROM signals WHERE status IN ('CORRECT','INCORRECT')"
+        params = []
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    stats = defaultdict(lambda: {"correct": 0, "incorrect": 0, "pnl_sum": 0.0, "pnl_n": 0})
+    for r in rows:
+        s = stats[r["action"]]
+        if r["status"] == "CORRECT":
+            s["correct"] += 1
+        else:
+            s["incorrect"] += 1
+        if r["pnl_pct"] is not None:
+            s["pnl_sum"] += r["pnl_pct"]
+            s["pnl_n"] += 1
+
+    result = {}
+    for action in ("BUY", "SELL"):
+        s = stats.get(action, {"correct": 0, "incorrect": 0, "pnl_sum": 0.0, "pnl_n": 0})
+        total = s["correct"] + s["incorrect"]
+        acc = round((s["correct"] / total) * 100, 1) if total else None
+        avg_pnl = round(s["pnl_sum"] / s["pnl_n"], 4) if s["pnl_n"] else None
+        total_pnl = round(s["pnl_sum"], 2) if s["pnl_n"] else None
+        result[action] = {
+            "count": total,
+            "accuracy_pct": acc,
+            "avg_pnl_pct": avg_pnl,
+            "total_pnl_pct": total_pnl,
+        }
+    return result
+
+
+def get_confidence_buckets(mode=None):
+    """Accuracy and average P&L grouped into 5-point confidence ranges,
+    among resolved (CORRECT/INCORRECT) signals — a consistently
+    loss-making bucket is a candidate to filter out."""
+    conn = _connect()
+    try:
+        query = "SELECT confidence, status, pnl_pct FROM signals WHERE status IN ('CORRECT','INCORRECT')"
+        params = []
+        if mode:
+            query += " AND mode = ?"
+            params.append(mode)
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    buckets = defaultdict(lambda: {"correct": 0, "incorrect": 0, "pnl_sum": 0.0, "pnl_n": 0})
+    for r in rows:
+        conf = r["confidence"] or 0
+        floor = int(conf // 5) * 5
+        key = f"{floor}-{floor + 5}"
+        b = buckets[key]
+        if r["status"] == "CORRECT":
+            b["correct"] += 1
+        else:
+            b["incorrect"] += 1
+        if r["pnl_pct"] is not None:
+            b["pnl_sum"] += r["pnl_pct"]
+            b["pnl_n"] += 1
+
+    result = {}
+    for key in sorted(buckets.keys(), key=lambda k: int(k.split("-")[0])):
+        b = buckets[key]
+        total = b["correct"] + b["incorrect"]
+        acc = round((b["correct"] / total) * 100, 1) if total else None
+        avg_pnl = round(b["pnl_sum"] / b["pnl_n"], 4) if b["pnl_n"] else None
+        result[key] = {"count": total, "accuracy_pct": acc, "avg_pnl_pct": avg_pnl}
     return result
 
 
@@ -387,7 +453,6 @@ def get_all_paper_balances():
 
 
 def clear_all_history():
-    """Wipes every signal record and every paper-trading balance."""
     with _write_lock:
         conn = _connect()
         try:

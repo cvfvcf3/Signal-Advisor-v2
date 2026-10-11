@@ -32,6 +32,12 @@ paper_trading:
   enabled: true
   starting_balance: 1000
   risk_pct_per_trade: 1.0
+  # Round-trip taker fee, as a fraction of price (0.0008 = 0.08%, a
+  # reasonable approximation for Binance USDT-M futures taker fees both
+  # ways). Deducted from every resolved trade's pnl_pct before it's used
+  # for accuracy-adjacent stats and the paper balance — gross_pnl_pct is
+  # still stored separately so the pre-fee number stays visible too.
+  fee_pct_roundtrip: 0.0008
 
 modes:
   scalp:
@@ -42,10 +48,6 @@ modes:
     evaluation_candles: 12
     success_move_pct: 0.002
     rr: 1.5
-    # ATR period (in primary-timeframe candles) used for volatility-adaptive
-    # sizing, and a hard floor on the stop distance so a calm recent window
-    # doesn't produce an unrealistically tight stop that ordinary noise
-    # would clip regardless of whether the trade's direction was right.
     atr_period: 14
     min_stop_pct: 0.0015
     cooldown_minutes: 20

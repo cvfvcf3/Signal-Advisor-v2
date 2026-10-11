@@ -7,15 +7,16 @@ at startup (by main.py) and its run_tick() is called on a timer
   2. Loops over every (symbol, mode) combination, running all 5 layers,
      combining them into a composite score, applying the BTC macro-filter
      to altcoins, and deciding BUY/SELL/WAIT.
-  3. On a new BUY/SELL: checks max_concurrent_positions for that mode,
-     computes a volatility-adaptive take_profit/stop_loss (with a hard
-     minimum stop distance per mode — see _compute_tp_sl), and records
-     the signal — guarded by duplicate protection and a per-mode cooldown.
+  3. On a new BUY/SELL: checks max_concurrent_positions, computes a
+     volatility-adaptive take_profit/stop_loss (with a hard minimum stop
+     distance per mode), and records the signal — guarded by duplicate
+     protection and a per-mode cooldown.
   4. Evaluates PENDING signals: price-action outcome first (path-aware
-     TP/SL/trailing — see evaluator.py), then INVALIDATION if still open
-     (the live composite reading has flipped hard enough to now itself
-     imply the opposite action). Computes paper-trading dollar P&L for
-     whichever outcome applies.
+     TP/SL/trailing), then INVALIDATION if still open. Whatever the
+     outcome, deducts the configured round-trip fee from the raw price
+     move (gross_pnl_pct) to get the NET pnl_pct actually used for the
+     paper-trading dollar P&L and for accuracy-adjacent stats — gross is
+     still stored separately for comparison.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
@@ -167,16 +168,6 @@ class Advisor:
             self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv)
 
     def _compute_tp_sl(self, action, entry_price, mode_cfg, primary_ohlcv):
-        """
-        Adaptive target: target_pct = max(success_move_pct, atr_multiplier * ATR%)
-        using a per-mode ATR lookback (slower modes use a longer ATR period
-        so a single unusually calm window doesn't produce an artificially
-        tight target/stop). Stop distance is target_pct / rr, then floored
-        at the mode's min_stop_pct — if the floor kicks in, the target is
-        recomputed from the floored stop (stop_pct * rr) so the configured
-        R:R ratio is preserved rather than shrinking when the floor
-        applies.
-        """
         atr_mult = self.config.get("adaptive_target", {}).get("atr_multiplier", 1.4)
         atr_period = mode_cfg.get("atr_period", 14)
         atr_pct_value = technical.atr_pct(primary_ohlcv, period=atr_period)
@@ -289,11 +280,25 @@ class Advisor:
             "mfe_pct": None,
         }
 
+    # ---------- fees ----------
+
+    def _apply_fees(self, result):
+        """Deducts the configured round-trip fee (percentage points) from
+        the raw price-move pnl_pct, returning (net_pnl_pct, gross_pnl_pct).
+        Fees always work against the position, regardless of direction."""
+        gross = result["pnl_pct"]
+        if gross is None:
+            return None, None
+        fee_fraction = self.config.get("paper_trading", {}).get("fee_pct_roundtrip", 0.0)
+        fee_points = fee_fraction * 100  # config is a fraction (0.0008 = 0.08%); pnl_pct is in percentage points
+        net = round(gross - fee_points, 4)
+        return net, gross
+
     # ---------- paper trading ----------
 
-    def _apply_paper_trading(self, sig, result):
+    def _apply_paper_trading(self, sig, net_pnl_pct):
         paper_cfg = self.config.get("paper_trading", {})
-        if not paper_cfg.get("enabled", True) or result.get("pnl_pct") is None:
+        if not paper_cfg.get("enabled", True) or net_pnl_pct is None:
             return None, None
 
         starting_balance = paper_cfg.get("starting_balance", 1000)
@@ -310,7 +315,7 @@ class Advisor:
 
         dollar_risk = current_balance * (risk_pct / 100)
         position_size_usd = dollar_risk / stop_distance_pct
-        dollar_pnl = position_size_usd * (result["pnl_pct"] / 100)
+        dollar_pnl = position_size_usd * (net_pnl_pct / 100)
 
         journal.apply_paper_pnl(sig["mode"], dollar_pnl, starting_balance)
 
@@ -336,10 +341,12 @@ class Advisor:
                     result = self._check_invalidation(sig)
 
                 if result is not None:
-                    dollar_pnl, position_size_usd = self._apply_paper_trading(sig, result)
+                    net_pnl_pct, gross_pnl_pct = self._apply_fees(result)
+                    dollar_pnl, position_size_usd = self._apply_paper_trading(sig, net_pnl_pct)
                     journal.resolve_signal(
                         sig["signal_id"], result["status"], result["exit_price"],
-                        result["mae_pct"], result["mfe_pct"], result.get("pnl_pct"),
+                        result["mae_pct"], result["mfe_pct"],
+                        net_pnl_pct, gross_pnl_pct,
                         dollar_pnl, position_size_usd,
                     )
             except Exception as e:

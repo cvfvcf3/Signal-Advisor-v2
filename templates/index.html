@@ -61,6 +61,13 @@
   .stat .value { font-size: 16px; font-weight: 600; }
   .stat .value.positive { color: var(--bull); }
   .stat .value.negative { color: var(--bear); }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+  .action-card { background: #0f1318; border-radius: 8px; padding: 10px; }
+  .action-card .hdr { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+  .action-card.BUY .hdr { color: var(--bull); }
+  .action-card.SELL .hdr { color: var(--bear); }
+  .action-card .row { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); padding: 2px 0; }
+  .action-card .row span.v { color: var(--text); }
   table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; white-space: nowrap; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
@@ -90,7 +97,7 @@
 <body>
 
 <h1>Signal Advisor v2</h1>
-<div class="subtitle">READ-ONLY · NO TRADING · Paper balances are simulated only</div>
+<div class="subtitle">READ-ONLY · NO TRADING · Paper balances are simulated only · P&L shown is net of a simulated round-trip fee</div>
 
 <div class="tabs" id="modeTabs"></div>
 <div id="panelsContainer"></div>
@@ -172,6 +179,20 @@ function buildPanels() {
       </div>
 
       <div class="card">
+        <strong>BUY vs SELL — ${mode}</strong>
+        <div class="two-col" id="actionBreakdown-${mode}"></div>
+      </div>
+
+      <div class="card">
+        <strong>Confidence Buckets — ${mode}</strong>
+        <div class="attr-note">Accuracy and avg P&L by confidence range — a consistently weak bucket is worth filtering out.</div>
+        <table>
+          <thead><tr><th>Range</th><th>Count</th><th>Acc%</th><th>Avg P&L%</th></tr></thead>
+          <tbody id="bucketBody-${mode}"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
         <strong>Layer Attribution — ${mode}</strong>
         <div class="attr-note">When a layer agreed with the trade's direction vs when it disagreed — a layer should be more accurate when it agrees.</div>
         <table>
@@ -234,7 +255,8 @@ function detailRowHtml(row, colspan) {
   const extra = resolved ? `
     <div class="detail-grid" style="margin-top:8px;">
       <div class="lbl">Exit price</div><div>${fmtNum(row.exit_price)}</div>
-      <div class="lbl">P&L %</div><div>${fmtPct(row.pnl_pct)}</div>
+      <div class="lbl">P&L % (net)</div><div>${fmtPct(row.pnl_pct)}</div>
+      <div class="lbl">P&L % (gross)</div><div>${fmtPct(row.gross_pnl_pct)}</div>
       <div class="lbl">$ P&L</div><div>${fmtUsd(row.dollar_pnl)}</div>
       <div class="lbl">Position size</div><div>${row.position_size_usd != null ? '$' + row.position_size_usd : '--'}</div>
       <div class="lbl">MAE %</div><div>${fmtNum(row.mae_pct)}</div>
@@ -309,6 +331,37 @@ async function refreshModePanel(mode) {
     const totEl = document.getElementById('statTotalPnl-' + mode);
     totEl.textContent = fmtPct(acc.total_pnl_pct);
     totEl.className = 'value ' + pnlClass(acc.total_pnl_pct);
+  } catch (e) { console.error(e); }
+
+  try {
+    const abRes = await fetch(`/api/action_breakdown?mode=${mode}`);
+    const ab = await abRes.json();
+    const div = document.getElementById('actionBreakdown-' + mode);
+    div.innerHTML = ['BUY', 'SELL'].map(a => {
+      const s = ab[a] || {};
+      return `<div class="action-card ${a}">
+        <div class="hdr">${a}</div>
+        <div class="row"><span>Trades</span><span class="v">${s.count ?? '--'}</span></div>
+        <div class="row"><span>Accuracy</span><span class="v">${s.accuracy_pct != null ? s.accuracy_pct + '%' : '--'}</span></div>
+        <div class="row"><span>Avg P&L%</span><span class="v">${fmtPct(s.avg_pnl_pct)}</span></div>
+        <div class="row"><span>Total P&L%</span><span class="v">${fmtPct(s.total_pnl_pct)}</span></div>
+      </div>`;
+    }).join('');
+  } catch (e) { console.error(e); }
+
+  try {
+    const bucketRes = await fetch(`/api/confidence_buckets?mode=${mode}`);
+    const buckets = await bucketRes.json();
+    const tbody = document.getElementById('bucketBody-' + mode);
+    const entries = Object.entries(buckets);
+    tbody.innerHTML = entries.map(([range, s]) => `
+      <tr>
+        <td>${range}</td>
+        <td>${s.count}</td>
+        <td>${s.accuracy_pct != null ? s.accuracy_pct + '%' : '--'}</td>
+        <td class="${pnlClass(s.avg_pnl_pct)}">${fmtPct(s.avg_pnl_pct)}</td>
+      </tr>
+    `).join('') || '<tr><td colspan="4" class="subtitle">Not enough resolved trades yet</td></tr>';
   } catch (e) { console.error(e); }
 
   try {

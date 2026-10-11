@@ -72,7 +72,7 @@ def _check_admin_token():
 CSV_COLUMNS = [
     "signal_id", "created_at", "symbol", "mode", "action", "confidence",
     "entry_price", "take_profit", "stop_loss", "status", "resolved_at",
-    "exit_price", "pnl_pct", "dollar_pnl", "position_size_usd",
+    "exit_price", "pnl_pct", "gross_pnl_pct", "dollar_pnl", "position_size_usd",
     "mae_pct", "mfe_pct",
 ]
 
@@ -138,13 +138,18 @@ def create_app(advisor, config):
 
     @app.route("/api/attribution")
     def api_attribution():
-        """
-        Level-1 attribution: per layer, accuracy when that layer agreed
-        with the trade's direction vs when it disagreed. Read-only,
-        computed from resolved CORRECT/INCORRECT signals only.
-        """
         mode = request.args.get("mode")
         return jsonify(journal.get_layer_attribution(mode=mode))
+
+    @app.route("/api/action_breakdown")
+    def api_action_breakdown():
+        mode = request.args.get("mode")
+        return jsonify(journal.get_action_breakdown(mode=mode))
+
+    @app.route("/api/confidence_buckets")
+    def api_confidence_buckets():
+        mode = request.args.get("mode")
+        return jsonify(journal.get_confidence_buckets(mode=mode))
 
     @app.route("/api/paper_balance")
     def api_paper_balance():
