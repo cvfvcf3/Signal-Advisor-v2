@@ -9,14 +9,18 @@ at startup (by main.py) and its run_tick() is called on a timer
      to altcoins, and deciding BUY/SELL/WAIT.
   3. On a new BUY/SELL: checks max_concurrent_positions, computes a
      volatility-adaptive take_profit/stop_loss (with a hard minimum stop
-     distance per mode), and records the signal — guarded by duplicate
-     protection and a per-mode cooldown.
+     distance per mode), then runs a fee-aware R:R check — if the
+     configured fee+slippage cost would eat too much of the edge at this
+     stop distance (below risk_management.min_net_rr), the signal is
+     skipped rather than recorded at a worse-than-intended ratio. Guarded
+     by duplicate protection and a per-mode cooldown.
   4. Evaluates PENDING signals: price-action outcome first (path-aware
-     TP/SL/trailing), then INVALIDATION if still open. Whatever the
-     outcome, deducts the configured round-trip fee from the raw price
-     move (gross_pnl_pct) to get the NET pnl_pct actually used for the
-     paper-trading dollar P&L and for accuracy-adjacent stats — gross is
-     still stored separately for comparison.
+     TP/SL/trailing), then INVALIDATION if still open. Deducts combined
+     fee+slippage cost from the raw price move (gross_pnl_pct) to get the
+     NET pnl_pct used for the paper-trading dollar P&L — position sizing
+     uses fixed fractional risk, capped at risk_management.max_leverage
+     times the current balance as a backstop against an unexpectedly
+     tiny stop distance producing an oversized position.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
@@ -167,7 +171,23 @@ class Advisor:
         if decision["action"] in ("BUY", "SELL"):
             self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv)
 
+    def _total_cost_pct_points(self):
+        """Combined fee+slippage, in percentage POINTS (same units as
+        pnl_pct), e.g. 0.14 meaning 0.14 percentage points."""
+        pt_cfg = self.config.get("paper_trading", {})
+        fee = pt_cfg.get("fee_pct_roundtrip", 0.0)
+        slippage = pt_cfg.get("slippage_pct_roundtrip", 0.0)
+        return (fee + slippage) * 100
+
     def _compute_tp_sl(self, action, entry_price, mode_cfg, primary_ohlcv):
+        """
+        Adaptive target with a per-mode ATR lookback and a hard minimum
+        stop distance. Then runs a fee-aware R:R check: if the combined
+        fee+slippage cost would drag the net reward:risk below
+        risk_management.min_net_rr at this stop distance, returns None
+        (caller skips recording the signal) rather than taking a trade
+        at a worse-than-intended ratio.
+        """
         atr_mult = self.config.get("adaptive_target", {}).get("atr_multiplier", 1.4)
         atr_period = mode_cfg.get("atr_period", 14)
         atr_pct_value = technical.atr_pct(primary_ohlcv, period=atr_period)
@@ -179,6 +199,15 @@ class Advisor:
         if min_stop_pct is not None and stop_pct < min_stop_pct:
             stop_pct = min_stop_pct
             target_pct = stop_pct * mode_cfg["rr"]
+
+        risk_cfg = self.config.get("risk_management", {})
+        min_net_rr = risk_cfg.get("min_net_rr")
+        if min_net_rr is not None:
+            cost_points = self._total_cost_pct_points()
+            net_reward_points = (target_pct * 100) - cost_points
+            net_risk_points = (stop_pct * 100) + cost_points
+            if net_risk_points <= 0 or (net_reward_points / net_risk_points) < min_net_rr:
+                return None, None  # fee-adjusted R:R too poor — skip this signal
 
         if action == "BUY":
             take_profit = entry_price * (1 + target_pct)
@@ -216,6 +245,8 @@ class Advisor:
                 return
 
         take_profit, stop_loss = self._compute_tp_sl(decision["action"], entry_price, mode_cfg, primary_ohlcv)
+        if take_profit is None:
+            return  # fee-aware R:R check rejected this signal
 
         signal_id = journal.record_signal(
             symbol=symbol,
@@ -280,18 +311,16 @@ class Advisor:
             "mfe_pct": None,
         }
 
-    # ---------- fees ----------
+    # ---------- fees + slippage ----------
 
     def _apply_fees(self, result):
-        """Deducts the configured round-trip fee (percentage points) from
-        the raw price-move pnl_pct, returning (net_pnl_pct, gross_pnl_pct).
-        Fees always work against the position, regardless of direction."""
+        """Deducts combined fee+slippage (percentage points) from the raw
+        price-move pnl_pct, returning (net_pnl_pct, gross_pnl_pct)."""
         gross = result["pnl_pct"]
         if gross is None:
             return None, None
-        fee_fraction = self.config.get("paper_trading", {}).get("fee_pct_roundtrip", 0.0)
-        fee_points = fee_fraction * 100  # config is a fraction (0.0008 = 0.08%); pnl_pct is in percentage points
-        net = round(gross - fee_points, 4)
+        cost_points = self._total_cost_pct_points()
+        net = round(gross - cost_points, 4)
         return net, gross
 
     # ---------- paper trading ----------
@@ -303,6 +332,7 @@ class Advisor:
 
         starting_balance = paper_cfg.get("starting_balance", 1000)
         risk_pct = paper_cfg.get("risk_pct_per_trade", 1.0)
+        max_leverage = self.config.get("risk_management", {}).get("max_leverage")
 
         current_balance = journal.get_paper_balance(sig["mode"], starting_balance)
 
@@ -315,6 +345,10 @@ class Advisor:
 
         dollar_risk = current_balance * (risk_pct / 100)
         position_size_usd = dollar_risk / stop_distance_pct
+
+        if max_leverage is not None:
+            position_size_usd = min(position_size_usd, current_balance * max_leverage)
+
         dollar_pnl = position_size_usd * (net_pnl_pct / 100)
 
         journal.apply_paper_pnl(sig["mode"], dollar_pnl, starting_balance)
