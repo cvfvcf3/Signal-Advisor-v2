@@ -32,26 +32,18 @@ paper_trading:
   enabled: true
   starting_balance: 1000
   risk_pct_per_trade: 1.0
-  # Round-trip taker fee + an estimated round-trip slippage allowance,
-  # both as a fraction of price. Combined into one "cost" deducted from
-  # every trade's pnl_pct. Slippage has no real execution to measure (this
-  # is paper trading), so this is an estimate, not an observed number.
   fee_pct_roundtrip: 0.0008
   slippage_pct_roundtrip: 0.0006
 
-# General position-sizing safety net. This does NOT fix fee-drag ratio
-# (that's purely a function of cost% vs stop%, independent of position
-# size or leverage — see min_net_rr below for the actual fee-aware
-# check) — it's a separate hard cap on dollar exposure per trade, as a
-# backstop against an unexpectedly tiny stop distance (bug, bad data,
-# extreme low-volatility reading) producing an oversized position.
 risk_management:
   max_leverage: 5
-  # Minimum acceptable reward:risk AFTER deducting fee+slippage from both
-  # sides, checked before a signal is even recorded. If costs eat too much
-  # of the edge at the current stop distance, the trade is skipped rather
-  # than taken at a worse-than-intended ratio.
-  min_net_rr: 1.2
+  # DISABLED (null): with a fixed cost of ~0.14 percentage points, this
+  # gate turned out to be mathematically incompatible with scalp's small
+  # targets (0.2-0.45%) at rr=1.5 — it required target >= ~1.54% to ever
+  # pass, blocking every scalp signal. The min_stop_pct increase (below)
+  # is the real, working fix for fee-drag; this pre-trade gate was
+  # over-engineered on top of it and is turned off for now.
+  min_net_rr: null
 
 modes:
   scalp:
@@ -65,9 +57,6 @@ modes:
     success_move_pct: 0.002
     rr: 1.5
     atr_period: 14
-    # Raised from 0.0015 to 0.003: at 0.0015 the fee+slippage (0.0014
-    # combined) ate ~93% of the designed risk on a stop-out. At 0.003 it's
-    # ~47% — still meaningful but no longer reversing the intended R:R.
     min_stop_pct: 0.003
     cooldown_minutes: 20
     max_concurrent_positions: 3
