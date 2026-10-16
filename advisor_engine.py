@@ -9,18 +9,24 @@ at startup (by main.py) and its run_tick() is called on a timer
      to altcoins, and deciding BUY/SELL/WAIT.
   3. On a new BUY/SELL: checks max_concurrent_positions, computes a
      volatility-adaptive take_profit/stop_loss (with a hard minimum stop
-     distance per mode), then runs a fee-aware R:R check — if the
-     configured fee+slippage cost would eat too much of the edge at this
-     stop distance (below risk_management.min_net_rr), the signal is
-     skipped rather than recorded at a worse-than-intended ratio. Guarded
-     by duplicate protection and a per-mode cooldown.
+     distance per mode). Guarded by duplicate protection and a per-mode
+     cooldown.
   4. Evaluates PENDING signals: price-action outcome first (path-aware
-     TP/SL/trailing), then INVALIDATION if still open. Deducts combined
-     fee+slippage cost from the raw price move (gross_pnl_pct) to get the
-     NET pnl_pct used for the paper-trading dollar P&L — position sizing
-     uses fixed fractional risk, capped at risk_management.max_leverage
-     times the current balance as a backstop against an unexpectedly
-     tiny stop distance producing an oversized position.
+     TP/SL/trailing — see evaluator.py), then INVALIDATION if still open.
+     Deducts combined fee+slippage cost from the raw price move
+     (gross_pnl_pct) to get the NET pnl_pct. CORRECT/INCORRECT is then
+     RECONFIRMED from the sign of the NET pnl_pct, not the gross price
+     move evaluator.py used — this matters specifically for trades that
+     resolve via timeout (window ran out with no TP/SL/trailing trigger):
+     evaluator.py has no knowledge of fees, so it classifies those purely
+     on raw price direction, which can disagree with the net outcome once
+     costs are subtracted (a trade that's up 0.08% on price alone but
+     costs 0.14% round-trip is a real loss, not a win). TP/SL/trailing
+     exits are economically explicit price levels and essentially never
+     flip sign from this reclassification given current stop-floor
+     sizing, but the check is applied uniformly for correctness rather
+     than special-cased. INVALIDATED is left untouched — it isn't a
+     target-hit outcome to begin with.
 
 PER-SYMBOL ERROR ISOLATION: a failure processing one (symbol, mode)
 combination is caught and logged; it does not stop the rest of the tick.
@@ -172,22 +178,12 @@ class Advisor:
             self._maybe_record_signal(symbol, mode_name, decision, entry_price, mode_cfg, layer_scores, primary_ohlcv)
 
     def _total_cost_pct_points(self):
-        """Combined fee+slippage, in percentage POINTS (same units as
-        pnl_pct), e.g. 0.14 meaning 0.14 percentage points."""
         pt_cfg = self.config.get("paper_trading", {})
         fee = pt_cfg.get("fee_pct_roundtrip", 0.0)
         slippage = pt_cfg.get("slippage_pct_roundtrip", 0.0)
         return (fee + slippage) * 100
 
     def _compute_tp_sl(self, action, entry_price, mode_cfg, primary_ohlcv):
-        """
-        Adaptive target with a per-mode ATR lookback and a hard minimum
-        stop distance. Then runs a fee-aware R:R check: if the combined
-        fee+slippage cost would drag the net reward:risk below
-        risk_management.min_net_rr at this stop distance, returns None
-        (caller skips recording the signal) rather than taking a trade
-        at a worse-than-intended ratio.
-        """
         atr_mult = self.config.get("adaptive_target", {}).get("atr_multiplier", 1.4)
         atr_period = mode_cfg.get("atr_period", 14)
         atr_pct_value = technical.atr_pct(primary_ohlcv, period=atr_period)
@@ -207,7 +203,7 @@ class Advisor:
             net_reward_points = (target_pct * 100) - cost_points
             net_risk_points = (stop_pct * 100) + cost_points
             if net_risk_points <= 0 or (net_reward_points / net_risk_points) < min_net_rr:
-                return None, None  # fee-adjusted R:R too poor — skip this signal
+                return None, None
 
         if action == "BUY":
             take_profit = entry_price * (1 + target_pct)
@@ -246,7 +242,7 @@ class Advisor:
 
         take_profit, stop_loss = self._compute_tp_sl(decision["action"], entry_price, mode_cfg, primary_ohlcv)
         if take_profit is None:
-            return  # fee-aware R:R check rejected this signal
+            return
 
         signal_id = journal.record_signal(
             symbol=symbol,
@@ -314,8 +310,6 @@ class Advisor:
     # ---------- fees + slippage ----------
 
     def _apply_fees(self, result):
-        """Deducts combined fee+slippage (percentage points) from the raw
-        price-move pnl_pct, returning (net_pnl_pct, gross_pnl_pct)."""
         gross = result["pnl_pct"]
         if gross is None:
             return None, None
@@ -376,9 +370,17 @@ class Advisor:
 
                 if result is not None:
                     net_pnl_pct, gross_pnl_pct = self._apply_fees(result)
+
+                    # Reconfirm CORRECT/INCORRECT from the NET outcome, not
+                    # evaluator's gross-price-only guess — see module
+                    # docstring. INVALIDATED is left as-is.
+                    final_status = result["status"]
+                    if final_status in ("CORRECT", "INCORRECT") and net_pnl_pct is not None:
+                        final_status = "CORRECT" if net_pnl_pct >= 0 else "INCORRECT"
+
                     dollar_pnl, position_size_usd = self._apply_paper_trading(sig, net_pnl_pct)
                     journal.resolve_signal(
-                        sig["signal_id"], result["status"], result["exit_price"],
+                        sig["signal_id"], final_status, result["exit_price"],
                         result["mae_pct"], result["mfe_pct"],
                         net_pnl_pct, gross_pnl_pct,
                         dollar_pnl, position_size_usd,
